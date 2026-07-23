@@ -111,9 +111,10 @@ const SheetService = {
     const lastRow = sheet.getLastRow();
     if (lastRow < 2) return 0;
     const lastCol = Math.max(sheet.getLastColumn(), 1);
-    const cleared = lastRow - 1;
-    sheet.getRange(2, 1, lastRow, lastCol).clearContent();
-    return cleared;
+    const numRows = lastRow - 1; // data rows only (header is row 1)
+    // getRange(row, column, numRows, numColumns) — NOT endRow/endCol
+    sheet.getRange(2, 1, numRows, lastCol).clearContent();
+    return numRows;
   },
 
   readAsObjects: function (sheetName, headers) {
@@ -150,8 +151,8 @@ const SheetService = {
     });
 
     const startRow = Math.max(sheet.getLastRow() + 1, 2);
-    const endRow = startRow + rows.length - 1;
-    sheet.getRange(startRow, 1, endRow, hdrs.length).setValues(rows);
+    // getRange(row, column, numRows, numColumns)
+    sheet.getRange(startRow, 1, rows.length, hdrs.length).setValues(rows);
   },
 
   updateRowsInPlace: function (sheetName, updates) {
@@ -594,8 +595,8 @@ function fetchSlackMessages() {
   const existingIds = {};
   const rawLastRow = rawSheet.getLastRow();
   if (rawLastRow > 1) {
-    // Include the last data row (previously off-by-one: rawLastRow - 1)
-    rawSheet.getRange(2, 1, rawLastRow, 1).getValues()
+    // getRange(row, column, numRows, numColumns)
+    rawSheet.getRange(2, 1, rawLastRow - 1, 1).getValues()
       .forEach(function (row) {
         if (row[0]) existingIds[String(row[0])] = true;
       });
@@ -827,18 +828,18 @@ function buildAlertsSheet() {
       ];
     });
 
-    // Clear all data rows (not lastRow-1 — that left the final row stale)
+    // Clear all data rows, then write with getRange(row, column, numRows, numColumns)
     SheetService.clearSheetDataRows(CONFIG.SHEETS.ALERTS);
-    const endRow = output.length + 1; // row 1 = headers
-    alertsSheet.getRange(2, 1, endRow, AL_HEADERS.length).setValues(output);
-    alertsSheet.getRange(2, 6, endRow, 6).setNumberFormat('M/d/yyyy HH:mm:ss');
-    alertsSheet.getRange(2, 7, endRow, 7).setNumberFormat('M/d/yyyy HH:mm:ss');
-    alertsSheet.getRange(2, 8, endRow, 8).setNumberFormat('0');
-    alertsSheet.getRange(2, 11, endRow, 11).setNumberFormat('0');
+    const n = output.length;
+    alertsSheet.getRange(2, 1, n, AL_HEADERS.length).setValues(output);
+    alertsSheet.getRange(2, 6, n, 1).setNumberFormat('M/d/yyyy HH:mm:ss');
+    alertsSheet.getRange(2, 7, n, 1).setNumberFormat('M/d/yyyy HH:mm:ss');
+    alertsSheet.getRange(2, 8, n, 1).setNumberFormat('0');
+    alertsSheet.getRange(2, 11, n, 1).setNumberFormat('0');
 
     const bgColors = sessions.map(function (s) { return [s.status === 'Live' ? '#d9ead3' : '#fce5cd']; });
     const fontColors = sessions.map(function (s) { return [s.status === 'Live' ? '#274e13' : '#7f2e00']; });
-    alertsSheet.getRange(2, 9, endRow, 9).setBackgrounds(bgColors).setFontColors(fontColors);
+    alertsSheet.getRange(2, 9, n, 1).setBackgrounds(bgColors).setFontColors(fontColors);
 
     Logger.log('📊 alerts rebuilt: ' + sessions.length + ' session(s).');
   }
