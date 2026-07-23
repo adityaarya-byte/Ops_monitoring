@@ -80,7 +80,8 @@ const TX_HEADERS = [
 const AL_HEADERS = [
   'Token', 'Exchange', 'Account', 'Side', 'Channel',
   'First Alert Time', 'Latest Alert Time', 'Duration (mins)',
-  'Status', 'Session Date', 'Occurrence', 'Reason', 'Reason Category'
+  'Status', 'Session Date', 'Occurrence', 'Reason',
+  'Reason Category', 'Rejection Type'
 ];
 
 
@@ -907,6 +908,9 @@ function buildAlertsSheet() {
   if (allRows.length === 0) {
     SheetService.clearSheetDataRows(CONFIG.SHEETS.ALERTS);
     Logger.log('ℹ️ No allowlisted rows — alerts sheet cleared.');
+    try {
+      if (typeof buildDashboard === 'function') buildDashboard();
+    } catch (e) { /* optional */ }
     return;
   }
 
@@ -920,7 +924,9 @@ function buildAlertsSheet() {
       groups[key] = {
         token: r.Token || 'N/A', exchange: r.Exchange || 'N/A',
         account: r.Account || 'N/A', side: r.Side || 'N/A',
-        channel: r.Channel, reason: r.Response, timestamps: []
+        channel: r.Channel, reason: r.Response,
+        format: r.Format || '',
+        timestamps: []
       };
     }
     groups[key].timestamps.push(ts);
@@ -953,7 +959,7 @@ function buildAlertsSheet() {
       return [
         s.token, s.exchange, s.account, s.side, s.channel,
         s.firstTime, s.latestTime, s.duration, s.status, s.sessionDate,
-        s.occurrence, s.reason, 'General'
+        s.occurrence, s.reason, s.reasonCategory, s.rejectionType
       ];
     });
 
@@ -972,19 +978,32 @@ function buildAlertsSheet() {
 
     Logger.log('📊 alerts rebuilt: ' + sessions.length + ' session(s).');
   }
+
+  // Refresh sheet dashboard after alerts rebuild (web app reads alerts live)
+  try {
+    if (typeof buildDashboard === 'function') buildDashboard();
+  } catch (dashErr) {
+    Logger.log('⚠️ buildDashboard skipped: ' + dashErr.message);
+  }
 }
 
 function createSessionRow(g, start, last, now, count) {
   const duration = Math.round((last - start) / 60000);
   const gapSinceLast = Math.round((now - last) / 60000);
   const status = gapSinceLast > CONFIG.INCIDENT_WINDOW_MINUTES ? 'Stopped' : 'Live';
+  const cls = (typeof classifyReason_ === 'function')
+    ? classifyReason_(g.reason, g.format, g.channel)
+    : { reasonCategory: 'Other', rejectionType: 'Uncategorized', severity: 'Low' };
   return {
     token: g.token, exchange: g.exchange, account: g.account,
     side: g.side, channel: g.channel,
     firstTime: start, latestTime: last, duration: duration,
     status: status,
     sessionDate: Utilities.formatDate(start, Session.getScriptTimeZone(), 'yyyy-MM-dd'),
-    occurrence: count, reason: g.reason
+    occurrence: count, reason: g.reason,
+    reasonCategory: cls.reasonCategory,
+    rejectionType: cls.rejectionType,
+    severity: cls.severity
   };
 }
 
@@ -1013,7 +1032,7 @@ function setupSheets() {
 function fetchAndProcessPipeline() {
   fetchSlackMessages();
   transformRawMessages();
-  buildAlertsSheet();
+  buildAlertsSheet(); // also rebuilds dashboard tab when Dashboard.gs is present
 }
 
 function installTrigger() {

@@ -9,6 +9,14 @@ Google Apps Script pipeline that fetches Slack rejection alerts, parses them int
 3. Confirm Script Property `TOKEN` holds the Slack bot token.
 4. Run `setupSheets()`, then `installTrigger()` (every 5 minutes) or `fetchAndProcessPipeline()` once.
 
+## Dashboard
+
+Sheet tab + web UI live under [`apps-script/`](apps-script/). See [`apps-script/DASHBOARD_SETUP.md`](apps-script/DASHBOARD_SETUP.md).
+
+- `Dashboard.gs` — classifies reasons, builds `dashboard` / `alerts_summary`
+- `WebApp.gs` + `Index.html` — Chart.js web app (`getDashboardData`)
+- Pipeline calls `buildDashboard()` at the end of `buildAlertsSheet()`
+
 ## Allowlist (V2.3)
 
 | Channel | Kept reasons |
