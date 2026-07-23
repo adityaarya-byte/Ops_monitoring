@@ -1,0 +1,1034 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CoinDCX | Rejection Dashboard (Local Preview)</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --navy: #0B2545;
+      --navy-2: #13315C;
+      --accent: #2F6BFF;
+      --accent-soft: rgba(47, 107, 255, 0.12);
+      --cb: #E85D4C;
+      --other: #3D8B7A;
+      --ok: #1F8A5B;
+      --warn: #D97706;
+      --bg: #F3F6FB;
+      --surface: #FFFFFF;
+      --surface-2: #EEF2F8;
+      --border: #D7E0EC;
+      --text: #12233A;
+      --muted: #5B6B80;
+      --shadow: 0 8px 24px rgba(11, 37, 69, 0.08);
+      --radius: 12px;
+      --topbar-h: 56px;
+      --font: "IBM Plex Sans", "Segoe UI", sans-serif;
+      --mono: "IBM Plex Mono", ui-monospace, monospace;
+    }
+
+    [data-theme="dark"] {
+      --bg: #0A1628;
+      --surface: #12233A;
+      --surface-2: #1A2F4A;
+      --border: #243B5A;
+      --text: #E8EEF7;
+      --muted: #9AADC4;
+      --shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+      --accent-soft: rgba(47, 107, 255, 0.22);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      line-height: 1.45;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 40;
+      height: var(--topbar-h);
+      background: linear-gradient(90deg, var(--navy) 0%, var(--navy-2) 100%);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+      box-shadow: 0 2px 12px rgba(11, 37, 69, 0.28);
+    }
+    .brand {
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      font-size: 1.05rem;
+      white-space: nowrap;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .brand > span.pipe { opacity: 0.72; font-weight: 500; }
+    .preview-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 0.68rem;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      background: #FBBF24;
+      color: #0B2545;
+    }
+    .topbar-actions { display: flex; align-items: center; gap: 10px; }
+    .meta {
+      font-size: 0.78rem;
+      opacity: 0.85;
+      font-family: var(--mono);
+    }
+    .btn {
+      border: 1px solid transparent;
+      background: var(--accent);
+      color: #fff;
+      border-radius: 8px;
+      padding: 7px 12px;
+      font: inherit;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.15s ease, opacity 0.15s ease, background 0.15s ease;
+    }
+    .btn:hover { transform: translateY(-1px); opacity: 0.95; }
+    .btn:active { transform: translateY(0); }
+    .btn.ghost {
+      background: rgba(255,255,255,0.08);
+      border-color: rgba(255,255,255,0.22);
+      color: #fff;
+    }
+    .btn.secondary {
+      background: var(--surface);
+      color: var(--text);
+      border-color: var(--border);
+    }
+    .btn.warn {
+      background: #F59E0B;
+      color: #0B2545;
+    }
+
+    .wrap {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 18px 16px 40px;
+    }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: end;
+      margin-bottom: 16px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px;
+      box-shadow: var(--shadow);
+    }
+    .seg {
+      display: inline-flex;
+      background: var(--surface-2);
+      border-radius: 10px;
+      padding: 3px;
+      gap: 2px;
+    }
+    .seg button {
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      font: inherit;
+      font-size: 0.82rem;
+      font-weight: 600;
+      padding: 8px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    .seg button.active {
+      background: var(--accent);
+      color: #fff;
+      box-shadow: 0 2px 8px rgba(47, 107, 255, 0.35);
+    }
+    .custom-range {
+      display: none;
+      align-items: end;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .custom-range.show { display: flex; }
+    label.field {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 0.72rem;
+      color: var(--muted);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    input[type="date"] {
+      font: inherit;
+      font-size: 0.85rem;
+      padding: 7px 10px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+    }
+    .toolbar-right {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .range-label {
+      font-size: 0.82rem;
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      box-shadow: var(--shadow);
+      min-height: 118px;
+      animation: fadeUp 0.35s ease both;
+    }
+    .card:nth-child(2) { animation-delay: 0.05s; }
+    .card:nth-child(3) { animation-delay: 0.1s; }
+    .card-title {
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .split {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .split-item {
+      background: var(--surface-2);
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+    .split-val {
+      font-size: 1.55rem;
+      font-weight: 750;
+      line-height: 1.1;
+      font-variant-numeric: tabular-nums;
+    }
+    .split-lbl {
+      font-size: 0.72rem;
+      color: var(--muted);
+      font-weight: 600;
+      margin-top: 2px;
+    }
+    .big-val {
+      font-size: 2rem;
+      font-weight: 750;
+      font-variant-numeric: tabular-nums;
+      line-height: 1.1;
+    }
+    .delta {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin-top: 8px;
+      font-size: 0.78rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+    .delta.up { color: var(--cb); }
+    .delta.down { color: var(--ok); }
+    .delta.flat { color: var(--muted); }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      animation: fadeUp 0.4s ease both;
+    }
+    .panel-h {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 8px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(180deg, var(--surface) 0%, var(--surface-2) 100%);
+    }
+    .panel-h h2 {
+      margin: 0;
+      font-size: 0.95rem;
+      font-weight: 700;
+    }
+    .panel-h .sub {
+      font-size: 0.75rem;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .panel-b { padding: 10px 12px 14px; }
+    .chart-wrap {
+      position: relative;
+      height: 260px;
+    }
+    .list {
+      max-height: 280px;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .list-row {
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      gap: 8px;
+      align-items: center;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: var(--surface-2);
+      font-size: 0.86rem;
+    }
+    .tok { font-weight: 700; font-family: var(--mono); }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 0.7rem;
+      font-weight: 700;
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+    .pill.live { background: rgba(31, 138, 91, 0.15); color: var(--ok); }
+    .pill.ended { background: rgba(91, 107, 128, 0.15); color: var(--muted); }
+    .occ {
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      color: var(--navy);
+    }
+    [data-theme="dark"] .occ { color: #9EC0FF; }
+    .empty {
+      color: var(--muted);
+      font-size: 0.85rem;
+      padding: 18px 8px;
+      text-align: center;
+    }
+
+    .table-wrap { overflow: auto; max-height: 420px; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.84rem;
+    }
+    th, td {
+      padding: 9px 10px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    th {
+      position: sticky;
+      top: 0;
+      background: var(--surface-2);
+      color: var(--muted);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      z-index: 1;
+    }
+    tr:hover td { background: var(--accent-soft); }
+    td.reason {
+      white-space: normal;
+      max-width: 280px;
+      color: var(--muted);
+    }
+
+    .status {
+      min-height: 20px;
+      margin-top: 8px;
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @media (max-width: 960px) {
+      .cards, .grid-2 { grid-template-columns: 1fr; }
+      .meta { display: none; }
+    }
+  </style>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      CoinDCX <span class="pipe">|</span> Rejection Dashboard
+      <span class="preview-badge">LOCAL PREVIEW</span>
+    </div>
+    <div class="topbar-actions">
+      <div class="meta" id="updatedAt">—</div>
+      <button class="btn ghost" id="themeBtn" type="button" title="Toggle theme">Dark</button>
+      <button class="btn warn" id="randomizeBtn" type="button">Randomize</button>
+      <button class="btn" id="refreshBtn" type="button">Refresh</button>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="toolbar">
+      <div class="seg" id="rangeSeg" role="group" aria-label="Date range">
+        <button type="button" data-range="today" class="active">Today</button>
+        <button type="button" data-range="yesterday">Yesterday</button>
+        <button type="button" data-range="last7">Last 7</button>
+        <button type="button" data-range="custom">Custom</button>
+      </div>
+      <div class="custom-range" id="customRange">
+        <label class="field">Start
+          <input type="date" id="startDate">
+        </label>
+        <label class="field">End
+          <input type="date" id="endDate">
+        </label>
+        <button class="btn secondary" id="applyCustom" type="button">Apply</button>
+      </div>
+      <div class="toolbar-right">
+        <div class="range-label" id="rangeLabel">Today</div>
+      </div>
+    </section>
+
+    <section class="cards" id="cards"></section>
+
+    <section class="grid-2">
+      <div class="panel">
+        <div class="panel-h">
+          <h2 id="persistTitle">Tokens Rejected ≥ 30 min</h2>
+          <div class="sub" id="persistSub">0 tokens</div>
+        </div>
+        <div class="panel-b">
+          <div class="list" id="persistList"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-h">
+          <h2 id="highTitle">High-Occurrence Tokens</h2>
+          <div class="sub" id="highSub">&gt; 100</div>
+        </div>
+        <div class="panel-b">
+          <div class="list" id="highList"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="grid-2">
+      <div class="panel">
+        <div class="panel-h">
+          <h2>Persisted by Type</h2>
+          <div class="sub" id="typeSub">doughnut</div>
+        </div>
+        <div class="panel-b">
+          <div class="chart-wrap"><canvas id="typeChart"></canvas></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-h">
+          <h2 id="trendTitle">Rejection Trend</h2>
+          <div class="sub">sessions vs occurrences</div>
+        </div>
+        <div class="panel-b">
+          <div class="chart-wrap"><canvas id="trendChart"></canvas></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" style="margin-top:12px">
+      <div class="panel-h">
+        <h2>CB Rejections</h2>
+        <div class="sub" id="tableSub">0 rows</div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Token</th>
+              <th>Exchange</th>
+              <th>Account</th>
+              <th>Reason</th>
+              <th>Type</th>
+              <th>Duration (m)</th>
+              <th>Occurrence</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="rejBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <div class="status" id="status">Local mock — no google.script.run</div>
+  </main>
+
+  <script>
+    var TYPE_COLORS = [
+      '#2F6BFF', '#E85D4C', '#3D8B7A', '#D97706', '#7C5CFF',
+      '#0EA5A4', '#DB2777', '#64748B', '#84CC16', '#F59E0B'
+    ];
+    var TOKENS = [
+      'BTC', 'ETH', 'SOL', 'XRP', 'ADA', 'DOGE', 'AVAX', 'DOT',
+      'MATIC', 'LINK', 'UNI', 'ATOM', 'LTC', 'NEAR', 'APT', 'SUI',
+      'SHIB', 'PEPE', 'ARB', 'OP'
+    ];
+    var EXCHANGES = ['Binance', 'OKX', 'Bybit', 'KuCoin', 'Gate'];
+    var ACCOUNTS = ['MM-A', 'MM-B', 'ARB-1', 'ARB-2', 'HEDGE'];
+    var TYPES = ['CB Rejection', 'Balance Rejection', 'Exchange Rejection', 'Insta Rejection', 'Uncategorized'];
+    var REASONS = [
+      'Market volatility circuit breaker',
+      'Insufficient balance for order',
+      'Price band breach',
+      'Exchange rate limit',
+      'Liquidity threshold not met',
+      'Order size below minimum'
+    ];
+
+    var rangeType = 'today';
+    var typeChart = null;
+    var trendChart = null;
+    var seed = 1;
+
+    function $(id) { return document.getElementById(id); }
+
+    function rnd(min, max) {
+      seed = (seed * 16807) % 2147483647;
+      var u = (seed - 1) / 2147483646;
+      return Math.floor(u * (max - min + 1)) + min;
+    }
+    function pick(arr) { return arr[rnd(0, arr.length - 1)]; }
+    function chance(p) { return rnd(1, 100) <= p; }
+
+    function pad2(n) { return (n < 10 ? '0' : '') + n; }
+
+    function formatUpdatedAt(d) {
+      var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      return months[d.getMonth()] + ' ' + d.getDate() + ', ' + d.getFullYear() + ' ' +
+        pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+    }
+
+    function isoDate(d) {
+      return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+    }
+
+    function parseRange(range) {
+      var dayMs = 86400000;
+      var now = new Date();
+      var todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      var type = (range && range.type) ? range.type : 'today';
+      var startD, endD, label;
+
+      if (type === 'custom' && range && range.start && range.end) {
+        startD = new Date(range.start + 'T00:00:00');
+        endD = new Date(range.end + 'T00:00:00');
+        if (endD < startD) { var t = startD; startD = endD; endD = t; }
+        label = isoDate(startD) + ' → ' + isoDate(endD);
+      } else if (type === 'yesterday') {
+        startD = new Date(todayStart.getTime() - dayMs);
+        endD = startD;
+        label = 'Yesterday';
+      } else if (type === 'last7') {
+        startD = new Date(todayStart.getTime() - 6 * dayMs);
+        endD = todayStart;
+        label = 'Last 7 days';
+      } else {
+        type = 'today';
+        startD = todayStart;
+        endD = todayStart;
+        label = 'Today';
+      }
+
+      var spanDays = Math.round((endD - startD) / dayMs) + 1;
+      return {
+        type: type,
+        startKey: isoDate(startD),
+        endKey: isoDate(endD),
+        label: label,
+        singleDay: spanDays === 1,
+        spanDays: spanDays
+      };
+    }
+
+    function currentRangeArg() {
+      if (rangeType === 'custom') {
+        return { type: 'custom', start: $('startDate').value, end: $('endDate').value };
+      }
+      return { type: rangeType };
+    }
+
+    /** Same shape as Apps Script getDashboardData(range) */
+    function generateMock(range) {
+      var R = parseRange(range || { type: 'today' });
+      var threshold = 100;
+      var persistMin = 30;
+
+      var totalTokens = rnd(8, 22);
+      var cbTokens = rnd(3, Math.max(3, Math.floor(totalTokens * 0.7)));
+      var totalOcc = rnd(400, 2400);
+      var cbOcc = rnd(120, Math.floor(totalOcc * 0.7));
+      var total = rnd(totalTokens, totalTokens * 4);
+      var cb = rnd(cbTokens, Math.max(cbTokens, Math.floor(total * 0.55)));
+      var active = rnd(0, 12);
+
+      var byTypePersisted = {};
+      var persistedTotal = 0;
+      TYPES.forEach(function (t) {
+        var n = rnd(0, 18);
+        if (t === 'CB Rejection') n = rnd(6, 28);
+        if (n > 0) {
+          byTypePersisted[t] = n;
+          persistedTotal += n;
+        }
+      });
+
+      var tokenPool = TOKENS.slice(0, totalTokens);
+      var persistedTokenList = tokenPool.slice(0, rnd(4, Math.min(12, tokenPool.length))).map(function (tok) {
+        return {
+          token: tok,
+          occurrence: rnd(5, 180),
+          exchange: pick(EXCHANGES),
+          status: chance(35) ? 'Live' : 'Ended'
+        };
+      }).sort(function (a, b) { return b.occurrence - a.occurrence; });
+
+      var highOccList = tokenPool.filter(function () { return chance(40); }).map(function (tok) {
+        return {
+          token: tok,
+          occurrence: rnd(threshold + 1, threshold + 400),
+          exchange: pick(EXCHANGES),
+          status: chance(30) ? 'Live' : 'Ended'
+        };
+      }).sort(function (a, b) { return b.occurrence - a.occurrence; });
+
+      var trendBuckets = [];
+      var trendMode;
+      if (R.singleDay) {
+        trendMode = 'time';
+        for (var i = 0; i < 48; i++) {
+          var h = Math.floor(i / 2);
+          var m = (i % 2) === 0 ? '00' : '30';
+          var hourFactor = (h >= 9 && h <= 16) ? 1.6 : 0.55;
+          trendBuckets.push({
+            label: pad2(h) + ':' + m,
+            cb: Math.max(0, Math.round(rnd(0, 6) * hourFactor)),
+            other: Math.max(0, Math.round(rnd(0, 5) * hourFactor)),
+            cbOcc: Math.max(0, Math.round(rnd(0, 40) * hourFactor)),
+            otherOcc: Math.max(0, Math.round(rnd(0, 30) * hourFactor))
+          });
+        }
+      } else {
+        trendMode = 'date';
+        var start = new Date(R.startKey + 'T00:00:00');
+        for (var d = 0; d < R.spanDays; d++) {
+          var day = new Date(start.getTime() + d * 86400000);
+          trendBuckets.push({
+            label: pad2(day.getMonth() + 1) + '-' + pad2(day.getDate()),
+            cb: rnd(2, 24),
+            other: rnd(1, 18),
+            cbOcc: rnd(20, 220),
+            otherOcc: rnd(10, 160)
+          });
+        }
+      }
+
+      var rejectionTable = [];
+      var nRows = rnd(8, 28);
+      for (var r = 0; r < nRows; r++) {
+        rejectionTable.push({
+          token: pick(tokenPool),
+          exchange: pick(EXCHANGES),
+          account: pick(ACCOUNTS),
+          reason: pick(REASONS),
+          type: 'CB Rejection',
+          duration: rnd(5, 180),
+          occurrence: rnd(1, 250),
+          status: chance(25) ? 'Live' : 'Ended'
+        });
+      }
+      rejectionTable.sort(function (a, b) { return b.occurrence - a.occurrence; });
+
+      return {
+        updatedAt: formatUpdatedAt(new Date()),
+        threshold: threshold,
+        persistMin: persistMin,
+        range: R,
+        scorecards: {
+          total: total,
+          totalTokens: totalTokens,
+          totalOcc: totalOcc,
+          cb: cb,
+          cbTokens: cbTokens,
+          cbOcc: cbOcc,
+          active: active
+        },
+        deltas: {
+          total: rnd(-18, 22),
+          cb: rnd(-12, 16),
+          active: rnd(-4, 5)
+        },
+        byTypePersisted: byTypePersisted,
+        persistedTotal: persistedTotal,
+        persistedTokenList: persistedTokenList,
+        trendBuckets: trendBuckets,
+        trendMode: trendMode,
+        highOccList: highOccList,
+        rejectionTable: rejectionTable
+      };
+    }
+
+    function fmtDelta(n) {
+      if (n == null || n === 0) return { cls: 'flat', text: 'vs prev · 0' };
+      var sign = n > 0 ? '+' : '';
+      return {
+        cls: n > 0 ? 'up' : 'down',
+        text: 'vs prev · ' + sign + n
+      };
+    }
+
+    function splitBlock(a, aLbl, b, bLbl) {
+      return '' +
+        '<div class="split">' +
+          '<div class="split-item"><div class="split-val">' + (a == null ? 0 : a) + '</div><div class="split-lbl">' + aLbl + '</div></div>' +
+          '<div class="split-item"><div class="split-val">' + (b == null ? 0 : b) + '</div><div class="split-lbl">' + bLbl + '</div></div>' +
+        '</div>';
+    }
+
+    function statusPill(status) {
+      var live = String(status || '').toLowerCase() === 'live';
+      return '<span class="pill ' + (live ? 'live' : 'ended') + '">' + (status || '—') + '</span>';
+    }
+
+    function esc(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function renderTokenList(el, rows) {
+      if (!rows || !rows.length) {
+        el.innerHTML = '<div class="empty">No tokens in this range</div>';
+        return;
+      }
+      el.innerHTML = rows.map(function (r) {
+        return '' +
+          '<div class="list-row">' +
+            '<div><span class="tok">' + esc(r.token) + '</span> <span style="color:var(--muted);font-size:0.75rem">' + esc(r.exchange || '') + '</span></div>' +
+            statusPill(r.status) +
+            '<div class="occ">' + (r.occurrence || 0) + '</div>' +
+          '</div>';
+      }).join('');
+    }
+
+    function renderCards(d) {
+      var s = d.scorecards || {};
+      var deltas = d.deltas || {};
+      var dTotal = fmtDelta(deltas.total);
+      var dCb = fmtDelta(deltas.cb);
+      var dActive = fmtDelta(deltas.active);
+
+      $('cards').innerHTML = '' +
+        '<div class="card">' +
+          '<div class="card-title">Total</div>' +
+          splitBlock(s.totalTokens, 'Tokens', s.totalOcc, 'Occurrences') +
+          '<div class="delta ' + dTotal.cls + '">' + dTotal.text + '</div>' +
+        '</div>' +
+        '<div class="card">' +
+          '<div class="card-title">CB Rejections</div>' +
+          splitBlock(s.cbTokens, 'Tokens', s.cbOcc, 'Occurrences') +
+          '<div class="delta ' + dCb.cls + '">' + dCb.text + '</div>' +
+        '</div>' +
+        '<div class="card">' +
+          '<div class="card-title">Active Live</div>' +
+          '<div class="big-val">' + (s.active == null ? 0 : s.active) + '</div>' +
+          '<div class="delta ' + dActive.cls + '">' + dActive.text + '</div>' +
+        '</div>';
+    }
+
+    function chartTextColor() {
+      return getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#5B6B80';
+    }
+    function chartGridColor() {
+      return getComputedStyle(document.documentElement).getPropertyValue('--border').trim() || '#D7E0EC';
+    }
+
+    function renderTypeChart(d) {
+      var map = d.byTypePersisted || {};
+      var labels = Object.keys(map);
+      var values = labels.map(function (k) { return map[k]; });
+      var total = d.persistedTotal || values.reduce(function (a, b) { return a + b; }, 0);
+      $('typeSub').textContent = total + ' persisted';
+
+      var cfg = {
+        type: 'doughnut',
+        data: {
+          labels: labels.length ? labels : ['None'],
+          datasets: [{
+            data: labels.length ? values : [1],
+            backgroundColor: labels.length ? labels.map(function (_, i) { return TYPE_COLORS[i % TYPE_COLORS.length]; }) : ['#94A3B8'],
+            borderWidth: 0,
+            hoverOffset: 6
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: {
+              position: 'bottom',
+              labels: { color: chartTextColor(), boxWidth: 10, font: { size: 11 } }
+            }
+          },
+          cutout: '58%'
+        }
+      };
+
+      if (typeChart) typeChart.destroy();
+      typeChart = new Chart($('typeChart'), cfg);
+    }
+
+    function renderTrendChart(d) {
+      var buckets = d.trendBuckets || [];
+      var labels = buckets.map(function (b) { return b.label; });
+      var mode = d.trendMode || 'time';
+      $('trendTitle').textContent = mode === 'date' ? 'Daily Trend' : 'Intraday Trend';
+
+      var text = chartTextColor();
+      var grid = chartGridColor();
+
+      var cfg = {
+        type: 'bar',
+        data: {
+          labels: labels,
+          datasets: [
+            {
+              type: 'bar',
+              label: 'CB sessions',
+              data: buckets.map(function (b) { return b.cb || 0; }),
+              backgroundColor: 'rgba(232, 93, 76, 0.75)',
+              borderRadius: 3,
+              yAxisID: 'y',
+              order: 2
+            },
+            {
+              type: 'bar',
+              label: 'Other sessions',
+              data: buckets.map(function (b) { return b.other || 0; }),
+              backgroundColor: 'rgba(61, 139, 122, 0.7)',
+              borderRadius: 3,
+              yAxisID: 'y',
+              order: 2
+            },
+            {
+              type: 'line',
+              label: 'CB occurrences',
+              data: buckets.map(function (b) { return b.cbOcc || 0; }),
+              borderColor: '#E85D4C',
+              backgroundColor: '#E85D4C',
+              tension: 0.25,
+              pointRadius: 0,
+              borderWidth: 2,
+              yAxisID: 'y1',
+              order: 1
+            },
+            {
+              type: 'line',
+              label: 'Other occurrences',
+              data: buckets.map(function (b) { return b.otherOcc || 0; }),
+              borderColor: '#3D8B7A',
+              backgroundColor: '#3D8B7A',
+              tension: 0.25,
+              pointRadius: 0,
+              borderWidth: 2,
+              yAxisID: 'y1',
+              order: 1
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          scales: {
+            x: {
+              ticks: {
+                color: text,
+                maxRotation: 0,
+                autoSkip: true,
+                maxTicksLimit: mode === 'time' ? 12 : 14,
+                font: { size: 10 }
+              },
+              grid: { color: 'transparent' }
+            },
+            y: {
+              position: 'left',
+              title: { display: true, text: 'Sessions', color: text, font: { size: 11 } },
+              ticks: { color: text, precision: 0 },
+              grid: { color: grid }
+            },
+            y1: {
+              position: 'right',
+              title: { display: true, text: 'Occurrences', color: text, font: { size: 11 } },
+              ticks: { color: text, precision: 0 },
+              grid: { drawOnChartArea: false }
+            }
+          },
+          plugins: {
+            legend: {
+              position: 'bottom',
+              labels: { color: text, boxWidth: 10, font: { size: 11 } }
+            }
+          }
+        }
+      };
+
+      if (trendChart) trendChart.destroy();
+      trendChart = new Chart($('trendChart'), cfg);
+    }
+
+    function renderTable(d) {
+      var rows = d.rejectionTable || [];
+      $('tableSub').textContent = rows.length + ' row' + (rows.length === 1 ? '' : 's');
+      var body = $('rejBody');
+      if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="8" class="empty">No CB rejections in this range</td></tr>';
+        return;
+      }
+      body.innerHTML = rows.map(function (r) {
+        return '' +
+          '<tr>' +
+            '<td class="tok">' + esc(r.token) + '</td>' +
+            '<td>' + esc(r.exchange) + '</td>' +
+            '<td>' + esc(r.account) + '</td>' +
+            '<td class="reason">' + esc(r.reason) + '</td>' +
+            '<td>' + esc(r.type) + '</td>' +
+            '<td>' + (r.duration == null ? '—' : r.duration) + '</td>' +
+            '<td class="occ">' + (r.occurrence || 0) + '</td>' +
+            '<td>' + statusPill(r.status) + '</td>' +
+          '</tr>';
+      }).join('');
+    }
+
+    function render(d) {
+      $('updatedAt').textContent = 'Updated ' + (d.updatedAt || '—');
+      $('rangeLabel').textContent = (d.range && d.range.label) ? d.range.label : rangeType;
+
+      var persistMin = d.persistMin != null ? d.persistMin : 30;
+      var threshold = d.threshold != null ? d.threshold : 100;
+      $('persistTitle').textContent = 'Tokens Rejected ≥ ' + persistMin + ' min';
+      $('persistSub').textContent = (d.persistedTokenList ? d.persistedTokenList.length : 0) + ' tokens';
+      $('highTitle').textContent = 'High-Occurrence Tokens';
+      $('highSub').textContent = '>' + threshold;
+
+      renderCards(d);
+      renderTokenList($('persistList'), d.persistedTokenList);
+      renderTokenList($('highList'), d.highOccList);
+      renderTypeChart(d);
+      renderTrendChart(d);
+      renderTable(d);
+      $('status').textContent = 'Local mock — no google.script.run';
+    }
+
+    function load() {
+      if (rangeType === 'custom' && (!$('startDate').value || !$('endDate').value)) {
+        $('status').textContent = 'Select start and end dates for custom range.';
+        return;
+      }
+      render(generateMock(currentRangeArg()));
+    }
+
+    function setTheme(theme) {
+      document.documentElement.setAttribute('data-theme', theme);
+      try { localStorage.setItem('rd-theme', theme); } catch (e) {}
+      $('themeBtn').textContent = theme === 'dark' ? 'Light' : 'Dark';
+    }
+
+    function initTheme() {
+      var saved = null;
+      try { saved = localStorage.getItem('rd-theme'); } catch (e) {}
+      setTheme(saved === 'dark' ? 'dark' : 'light');
+    }
+
+    function initDates() {
+      var now = new Date();
+      $('endDate').value = isoDate(now);
+      $('startDate').value = isoDate(new Date(now.getTime() - 6 * 86400000));
+    }
+
+    $('themeBtn').addEventListener('click', function () {
+      var cur = document.documentElement.getAttribute('data-theme') || 'light';
+      setTheme(cur === 'dark' ? 'light' : 'dark');
+      load();
+    });
+
+    $('refreshBtn').addEventListener('click', load);
+
+    $('randomizeBtn').addEventListener('click', function () {
+      seed = Date.now() % 2147483647;
+      if (seed < 1) seed = 1;
+      load();
+    });
+
+    Array.prototype.forEach.call($('rangeSeg').querySelectorAll('button'), function (btn) {
+      btn.addEventListener('click', function () {
+        Array.prototype.forEach.call($('rangeSeg').querySelectorAll('button'), function (b) {
+          b.classList.toggle('active', b === btn);
+        });
+        rangeType = btn.getAttribute('data-range');
+        $('customRange').classList.toggle('show', rangeType === 'custom');
+        if (rangeType !== 'custom') load();
+      });
+    });
+
+    $('applyCustom').addEventListener('click', function () {
+      rangeType = 'custom';
+      load();
+    });
+
+    initTheme();
+    initDates();
+    load();
+  </script>
+</body>
+</html>
