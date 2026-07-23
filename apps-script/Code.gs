@@ -33,12 +33,11 @@ const CONFIG = {
   },
 
   CHANNELS: [
-    // Formerly labeled "IF-Mercury" — insufficient-funds rails rejections
-    { id: 'C0BDYE1RQTH', name: 'insufficient-funds-rails-mercury-rejections' },
-    { id: 'C08TQHSSL73', name: 'alerts-action-required-mercury' },
     { id: 'C01R3QCR62Y', name: 'alerts-exchange-funds' },
+    { id: 'C08TQHSSL73', name: 'alerts-action-required-mercury' },
+    { id: 'C08T9KQGQ13', name: 'alerts-exchange-funds-mercury' },
     { id: 'C0BCN9QG679', name: 'cb-order-rejection' },
-    { id: 'C08T9KQGQ13', name: 'Mercury' }
+    { id: 'C0BDYE1RQTH', name: 'insufficient-funds-rails-mercury-rejections' }
   ],
 
   CB_CHANNEL_NAME: 'cb-order-rejection',
