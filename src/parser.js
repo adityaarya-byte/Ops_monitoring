@@ -230,49 +230,59 @@ const AlertFilters = {
     return false;
   },
 
-  /**
-   * Channel rules:
-   *  - cb-order-rejection → volatile only
-   *  - insufficient-funds-rails-mercury-rejections → ALL parsed reasons
-   *  - alerts-exchange-funds-mercury → ALL parsed
-   *  - alerts-exchange-funds → Insta.InternalTpOrder only (drop Futures / unsettled conversion)
-   *  - alerts-action-required-mercury → non-Coindcx action failures
-   */
+  isExchangeFundsMercury: function (ch) {
+    return ch === 'alerts-exchange-funds-mercury' || ch === 'mercury';
+  },
+
+  isExchangeFunds: function (ch) {
+    return (
+      ch === 'alerts-exchange-funds' ||
+      (ch.indexOf('alerts-exchange-funds') !== -1 && ch.indexOf('mercury') === -1)
+    );
+  },
+
+  isActionRequired: function (ch) {
+    return ch === 'alerts-action-required-mercury' || ch.indexOf('alerts-action-required') !== -1;
+  },
+
+  isRailsChannel: function (ch) {
+    return ch.indexOf('insufficient-funds-rails') !== -1 || ch === 'if-mercury';
+  },
+
   shouldKeepAlert: function (item) {
     if (!item) return false;
     const ch = AlertFilters.channelKey(item.Channel);
     const raw = String(item.RawText || '');
     const ex = String(item.Exchange || '').toLowerCase();
+    const resp = String(item.Response || item.reason || '');
 
     if (AlertFilters.isCbChannel(ch) || item.Format === 'CB-Digest') {
-      return AlertFilters.isVolatileReason(item.Response || item.reason);
+      return AlertFilters.isVolatileReason(resp);
     }
 
-    if (ch.indexOf('insufficient-funds-rails') !== -1) {
-      return true; // all reasons from this channel
-    }
+    if (AlertFilters.isRailsChannel(ch)) return true;
+    if (AlertFilters.isExchangeFundsMercury(ch)) return true;
 
-    if (ch === 'alerts-exchange-funds-mercury') {
-      return true; // all parsed alerts
-    }
-
-    if (ch === 'alerts-exchange-funds') {
+    if (AlertFilters.isExchangeFunds(ch)) {
       if (/Futures\s+Order rejected:/i.test(raw)) return false;
       if (/Total unsettled Conversion order Requests/i.test(raw)) return false;
       if (item.Format === 'Insta-InternalTp') return true;
-      if (/Otc::Order did not succeeded/i.test(item.Response || '') || /Otc::Order did not succeeded/i.test(raw)) {
+      if (/Otc::Order did not succeeded/i.test(resp) || /Otc::Order did not succeeded/i.test(raw)) {
         return true;
       }
+      if (AlertFilters.isInsufficientReason(item)) return true;
       return false;
     }
 
-    if (ch === 'alerts-action-required-mercury') {
+    if (AlertFilters.isActionRequired(ch)) {
       if (/Could not \w+ order on\s+Coindcx/i.test(raw) || ex === 'coindcx') return false;
-      if (item.Format === 'JSON-Action') return true;
-      return AlertFilters.isInsufficientReason(item);
+      return true;
     }
 
-    return AlertFilters.isInsufficientReason(item);
+    if (AlertFilters.isInsufficientReason(item)) return true;
+    if (item.Format === 'Insta-InternalTp' || /Otc::Order did not succeeded/i.test(resp)) return true;
+    if (item.Format === 'INSTA-Key-Value' || item.Format === 'JSON-Action') return true;
+    return false;
   }
 };
 

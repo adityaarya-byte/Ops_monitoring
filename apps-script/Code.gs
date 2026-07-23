@@ -408,49 +408,75 @@ const AlertFilters = {
     return false;
   },
 
+  isExchangeFundsMercury: function (ch) {
+    return ch === 'alerts-exchange-funds-mercury' || ch === 'mercury';
+  },
+
+  isExchangeFunds: function (ch) {
+    // Exact / legacy names — must NOT match alerts-exchange-funds-mercury
+    return (
+      ch === 'alerts-exchange-funds' ||
+      (ch.indexOf('alerts-exchange-funds') !== -1 && ch.indexOf('mercury') === -1)
+    );
+  },
+
+  isActionRequired: function (ch) {
+    return ch === 'alerts-action-required-mercury' || ch.indexOf('alerts-action-required') !== -1;
+  },
+
+  isRailsChannel: function (ch) {
+    return ch.indexOf('insufficient-funds-rails') !== -1 || ch === 'if-mercury';
+  },
+
   /**
    * Channel rules:
    *  - cb-order-rejection → volatile only
-   *  - insufficient-funds-rails-mercury-rejections → ALL parsed reasons
+   *  - insufficient-funds-rails-* → ALL parsed reasons
    *  - alerts-exchange-funds-mercury → ALL parsed
-   *  - alerts-exchange-funds → Insta.InternalTpOrder only (drop Futures / unsettled conversion)
-   *  - alerts-action-required-mercury → non-Coindcx action failures
+   *  - alerts-exchange-funds → Insta.InternalTp + balance/insufficient; drop Futures / unsettled
+   *  - alerts-action-required-mercury → all non-Coindcx parsed alerts
    */
   shouldKeepAlert: function (item) {
     if (!item) return false;
     const ch = AlertFilters.channelKey(item.Channel);
     const raw = String(item.RawText || '');
     const ex = String(item.Exchange || '').toLowerCase();
+    const resp = String(item.Response || item.reason || '');
 
     if (AlertFilters.isCbChannel(ch) || item.Format === 'CB-Digest') {
-      return AlertFilters.isVolatileReason(item.Response || item.reason);
+      return AlertFilters.isVolatileReason(resp);
     }
 
-    if (ch.indexOf('insufficient-funds-rails') !== -1) {
-      return true; // all reasons from this channel
+    if (AlertFilters.isRailsChannel(ch)) {
+      return true; // all reasons from rails channel
     }
 
-    if (ch === 'alerts-exchange-funds-mercury') {
+    if (AlertFilters.isExchangeFundsMercury(ch)) {
       return true; // all parsed alerts
     }
 
-    if (ch === 'alerts-exchange-funds') {
+    if (AlertFilters.isExchangeFunds(ch)) {
       if (/Futures\s+Order rejected:/i.test(raw)) return false;
       if (/Total unsettled Conversion order Requests/i.test(raw)) return false;
       if (item.Format === 'Insta-InternalTp') return true;
-      if (/Otc::Order did not succeeded/i.test(item.Response || '') || /Otc::Order did not succeeded/i.test(raw)) {
+      if (/Otc::Order did not succeeded/i.test(resp) || /Otc::Order did not succeeded/i.test(raw)) {
         return true;
       }
+      // Keep balance / insufficient (previous keyword behavior on this channel)
+      if (AlertFilters.isInsufficientReason(item)) return true;
       return false;
     }
 
-    if (ch === 'alerts-action-required-mercury') {
+    if (AlertFilters.isActionRequired(ch)) {
       if (/Could not \w+ order on\s+Coindcx/i.test(raw) || ex === 'coindcx') return false;
-      if (item.Format === 'JSON-Action') return true;
-      return AlertFilters.isInsufficientReason(item);
+      return true; // all other successfully parsed alerts (Binance / KC / Gateio / …)
     }
 
-    return AlertFilters.isInsufficientReason(item);
+    // Unknown / legacy channel names — keep insufficient + insta-style failures
+    if (AlertFilters.isInsufficientReason(item)) return true;
+    if (item.Format === 'Insta-InternalTp' || /Otc::Order did not succeeded/i.test(resp)) return true;
+    if (item.Format === 'INSTA-Key-Value' || item.Format === 'JSON-Action') return true;
+    return false;
   }
 };
 
@@ -943,6 +969,8 @@ function transformRawMessages() {
   const cbToAppend = [];
   const rawUpdates = [];
 
+  var stats = { parsed: 0, kept: 0, filtered: 0, unparsed: 0 };
+
   pendingRows.forEach(function (row) {
     var parsedList;
     try {
@@ -953,16 +981,21 @@ function transformRawMessages() {
     }
 
     if (parsedList && parsedList.length > 0) {
+      stats.parsed += parsedList.length;
       var keptAny = false;
       parsedList.forEach(function (item) {
         // Per-channel allowlist (see AlertFilters.shouldKeepAlert)
         if (!AlertFilters.shouldKeepAlert(item)) {
+          stats.filtered++;
           Logger.log(
-            '⏭️ Dropped (reason filter): ch=' + item.Channel +
-            ' token=' + item.Token + ' reason=' + String(item.Response || '').substring(0, 80)
+            '⏭️ Dropped (filter): ch=' + item.Channel +
+            ' fmt=' + item.Format +
+            ' token=' + item.Token +
+            ' reason=' + String(item.Response || '').substring(0, 80)
           );
           return;
         }
+        stats.kept++;
         keptAny = true;
         if (AlertFilters.isCbChannel(item.Channel) || item.Format === 'CB-Digest') {
           cbToAppend.push(item);
@@ -974,13 +1007,27 @@ function transformRawMessages() {
         row: row.__row,
         values: {
           status: keptAny ? 'PROCESSED' : 'SKIPPED',
-          error_message: keptAny ? '' : 'Filtered by reason allowlist'
+          error_message: keptAny ? '' : 'Filtered by channel allowlist'
         }
       });
     } else {
+      stats.unparsed++;
+      // Log a short preview so we can see which Slack formats still fail
+      Logger.log(
+        '❓ Unparsed ch=' + row.channel_name +
+        ' text=' + String(row.raw_text || '').replace(/\s+/g, ' ').substring(0, 120)
+      );
       rawUpdates.push({ row: row.__row, values: { status: 'SKIPPED', error_message: 'No parse result' } });
     }
   });
+
+  Logger.log(
+    '📊 Transform stats: pending=' + pendingRows.length +
+    ' parsedRows=' + stats.parsed +
+    ' kept=' + stats.kept +
+    ' filtered=' + stats.filtered +
+    ' unparsedMsgs=' + stats.unparsed
+  );
 
   mainToAppend.sort(function (a, b) { return new Date(b.Timestamp) - new Date(a.Timestamp); });
   cbToAppend.sort(function (a, b) { return new Date(b.Timestamp) - new Date(a.Timestamp); });
@@ -992,6 +1039,9 @@ function transformRawMessages() {
   if (cbToAppend.length > 0) {
     SheetService.appendObjects(CONFIG.SHEETS.TRANSFORM_CB, cbToAppend);
     Logger.log('✅ ' + cbToAppend.length + ' row(s) → transform_cb');
+  }
+  if (stats.kept === 0) {
+    Logger.log('⚠️ Nothing kept — if Slack has older alerts, run resetSlackCursors() then fetchAndProcessPipeline(), or resetAndRebuildAllowlistedAlerts().');
   }
 
   if (rawUpdates.length > 0) SheetService.updateRowsInPlace(CONFIG.SHEETS.RAW, rawUpdates);

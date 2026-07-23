@@ -333,7 +333,16 @@ run('allowlist: per-channel keep rules', function () {
       ErrorCode: '',
       RawText: 'Could not CREATE order'
     }),
-    false
+    true // non-Coindcx action-required keeps all parsed
+  );
+  assert.strictEqual(
+    AlertFilters.shouldKeepAlert({
+      Channel: EXCHANGE_FUNDS,
+      Response: 'Account has insufficient balance for requested action.',
+      ErrorCode: '-2010',
+      RawText: 'INSUFFICIENT_FUNDS Order rejected'
+    }),
+    true // balance keywords still kept on alerts-exchange-funds
   );
   assert.strictEqual(
     AlertFilters.shouldKeepAlert({
