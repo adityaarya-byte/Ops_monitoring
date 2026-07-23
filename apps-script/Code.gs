@@ -29,7 +29,9 @@ const CONFIG = {
     TRANSFORM: 'transform',
     TRANSFORM_CB: 'transform_cb',
     ALERTS: 'alerts',
-    SUMMARY: 'alerts_summary'
+    SUMMARY: 'alerts_summary',
+    // Lookup: id → external_instrument_name  → Token "1343_BTCINR"
+    INSTRUMENT_ID: 'instrument_id'
   },
 
   CHANNELS: [
@@ -356,14 +358,21 @@ const ParserUtils = {
     const fromMsg = ParserUtils.extractMsgFromDetails(text);
     if (fromMsg) return fromMsg;
 
-    // "message":"binance Account has insufficient balance for requested action."
-    const plainFull = text.match(/"message"\s*:\s*"((?:binance|gate|kucoin|gateio)?[^"]*(?:insufficient|not enough balance|BALANCE_NOT_ENOUGH)[^"]*)"/i);
-    if (plainFull) return ParserUtils.cleanField(plainFull[1]);
-
+    // Nested rpc / InvalidOrder: ..."message":"binance Filter failure: PERCENT_PRICE_BY_SIDE"
     const nested = text.match(
       /"message"\s*:\s*"(?:gate\s*)?\{[^"]*"message"\s*:\s*"([^"]+)"/i
     );
     if (nested) return nested[1];
+
+    const anyMsg = text.match(
+      /"message"\s*:\s*"([^"]*(?:Filter failure|InvalidOrder|PERCENT_PRICE|insufficient|not enough balance|BALANCE_NOT_ENOUGH)[^"]*)"/i
+    );
+    if (anyMsg) return ParserUtils.cleanField(anyMsg[1]);
+
+    const plainFull = text.match(
+      /"message"\s*:\s*"((?:binance|gate|kucoin|gateio)?[^"]*(?:insufficient|not enough balance|BALANCE_NOT_ENOUGH)[^"]*)"/i
+    );
+    if (plainFull) return ParserUtils.cleanField(plainFull[1]);
 
     const plain = text.match(/"message"\s*:\s*"([^"]*(?:not enough balance|insufficient)[^"]*)"/i);
     if (plain) return plain[1];
@@ -372,6 +381,57 @@ const ParserUtils = {
       return 'Not enough balance';
     }
     return '';
+  }
+};
+
+/**
+ * Maps instrument_id (from Slack JSON) → "{id}_{external_instrument_name}"
+ * using the `instrument_id` sheet (cols: A name, B id, …).
+ */
+const InstrumentLookup = {
+  _cache: null,
+  _cacheAt: 0,
+  CACHE_MS: 5 * 60 * 1000,
+
+  clearCache: function () {
+    this._cache = null;
+    this._cacheAt = 0;
+  },
+
+  loadMap: function () {
+    const now = Date.now();
+    if (this._cache && (now - this._cacheAt) < this.CACHE_MS) return this._cache;
+
+    const map = {};
+    try {
+      const sheetName = (CONFIG.SHEETS && CONFIG.SHEETS.INSTRUMENT_ID) || 'instrument_id';
+      const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+      if (sh && sh.getLastRow() > 1) {
+        // getRange(row, column, numRows, numColumns)
+        const numRows = sh.getLastRow() - 1;
+        const values = sh.getRange(2, 1, numRows, 2).getValues();
+        values.forEach(function (row) {
+          const name = String(row[0] || '').trim(); // external_instrument_name
+          const id = String(row[1] || '').trim();   // id
+          if (id && name) map[id] = id + '_' + name;
+        });
+      }
+    } catch (e) {
+      Logger.log('⚠️ InstrumentLookup load failed: ' + e.message);
+    }
+
+    this._cache = map;
+    this._cacheAt = now;
+    Logger.log('📇 Instrument map loaded: ' + Object.keys(map).length + ' id(s)');
+    return map;
+  },
+
+  /** @returns {string} e.g. "1343_BTCINR" or "1343" if unmapped */
+  resolveToken: function (instrumentId) {
+    if (instrumentId === undefined || instrumentId === null || instrumentId === '') return '';
+    const id = String(instrumentId).trim();
+    const mapped = this.loadMap()[id];
+    return mapped || id;
   }
 };
 
@@ -657,7 +717,7 @@ function parseSlackAlert(rawText, timestamp, channelName) {
     }
 
     // FORMAT D: Could not CREATE/CANCEL order on Binance|Gateio|Kucoin (skip Coindcx via filter)
-    // Token = trace_id; reason = InsufficientFunds message
+    // Token = "{instrument_id}_{external_instrument_name}" via instrument_id sheet lookup
     if (/Could not \w+ order on/i.test(text)) {
       const exchangeMatch = text.match(/Could not \w+ order on (\w+)/i);
       const exchangeName = exchangeMatch ? exchangeMatch[1] : '';
@@ -667,29 +727,44 @@ function parseSlackAlert(rawText, timestamp, channelName) {
       const orderJsonMatch = text.match(/\{"version"[\s\S]*?\}/);
       if (orderJsonMatch) { try { orderObj = JSON.parse(orderJsonMatch[0]); } catch (e) {} }
 
-      const traceId = orderObj.trace_id
-        ? String(orderObj.trace_id)
-        : (function () {
-            const tm = text.match(/"trace_id"\s*:\s*"([^"]+)"/i);
-            return tm ? tm[1] : '';
-          })();
+      var instrumentId = orderObj.instrument_id;
+      if (instrumentId === undefined || instrumentId === null || instrumentId === '') {
+        const im = text.match(/"instrument_id"\s*:\s*(\d+)/i);
+        if (im) instrumentId = im[1];
+      }
+
       const orderId = orderObj.client_order_id
         ? String(orderObj.client_order_id)
         : (orderObj.id ? String(orderObj.id) : '');
 
+      // Token: map instrument_id → "1343_BTCINR" (sheet instrument_id)
+      var token = '';
+      if (typeof InstrumentLookup !== 'undefined' && InstrumentLookup.resolveToken) {
+        token = InstrumentLookup.resolveToken(instrumentId);
+      } else if (instrumentId !== undefined && instrumentId !== null && instrumentId !== '') {
+        token = String(instrumentId);
+      }
+
       var response = ParserUtils.extractInsufficientMessage(text);
-      // Prefer full "binance Account has insufficient..." when present
-      const msgBinance = text.match(/"message"\s*:\s*"(binance [^"]+)"/i);
-      if (msgBinance) response = ParserUtils.cleanField(msgBinance[1]);
+      // Prefer plain exchange messages; skip nested JSON like gate {\"label\":...}
+      const msgEx = text.match(
+        /"message"\s*:\s*"((?:binance|gate|kucoin|gateio)\s[^"{][^"]*)"/i
+      );
+      if (msgEx) response = ParserUtils.cleanField(msgEx[1]);
+      if (!response) {
+        const anyMsg = text.match(/"message"\s*:\s*"([^"{][^"]*)"/i);
+        if (anyMsg) response = ParserUtils.cleanField(anyMsg[1]);
+      }
       var errCode = '';
       if (/BALANCE_NOT_ENOUGH/i.test(text)) errCode = 'BALANCE_NOT_ENOUGH';
       else if (/InsufficientFunds/i.test(text)) errCode = 'InsufficientFunds';
+      else if (/InvalidOrder/i.test(text)) errCode = 'InvalidOrder';
       if (!response) response = 'Order action failed';
 
       return [{
         Timestamp: timestamp,
         Exchange: exchangeName,
-        Token: traceId || (orderObj.instrument_id ? ('instrument_' + orderObj.instrument_id) : ''),
+        Token: token,
         Side: orderObj.side ? String(orderObj.side).toLowerCase() : '',
         Qty: orderObj.ordered_quantity !== undefined ? String(orderObj.ordered_quantity) : '',
         Account: orderObj.exchange_account_id !== undefined ? String(orderObj.exchange_account_id) : '',
