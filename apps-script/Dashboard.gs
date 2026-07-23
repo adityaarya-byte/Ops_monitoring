@@ -45,7 +45,10 @@ var CLASSIFY_RULES = [
   { kw: 'not enough balance', category: 'Insufficient Balance', type: 'Balance Rejection', severity: 'Medium' },
 
   { kw: 'something went wrong', category: 'System/Unknown Error', type: 'Insta Rejection', severity: 'Medium' },
-  { kw: 'did not succeeded', category: 'OTC Order Failed', type: 'Insta Rejection', severity: 'Medium' }
+  { kw: 'otc::order did not succeeded', category: 'OTC Order Failed', type: 'Insta Rejection', severity: 'Medium' },
+  { kw: 'did not succeeded', category: 'OTC Order Failed', type: 'Insta Rejection', severity: 'Medium' },
+  { kw: 'network error', category: 'Network Error', type: 'Exchange Rejection', severity: 'Medium' },
+  { kw: 'internal error', category: 'Exchange Internal Error', type: 'Exchange Rejection', severity: 'Medium' }
 ];
 
 function getSS_() {
