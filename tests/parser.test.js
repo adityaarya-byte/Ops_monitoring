@@ -50,7 +50,7 @@ run('parses Production PROD Instrument/Symbol → SAPIENUSDT + insufficient reas
 
 run('parses bullet PRODUCTION Symbol → full B-S-HBAR_USDT', function () {
   const text =
-    '`[SPOT][PRODUCTION][INSUFFICIENT_FUNDS]` Order rejected on Binance\n' +
+    '[SPOT][PRODUCTION][INSUFFICIENT_FUNDS] Order rejected on Binance\n' +
     '• Exchange: `Binance`\n' +
     '• Symbol: `B-S-HBAR_USDT`\n' +
     '• Side: `SELL`\n' +
@@ -60,11 +60,38 @@ run('parses bullet PRODUCTION Symbol → full B-S-HBAR_USDT', function () {
     '• Env: `Mercury-Production`\n' +
     '• Error: `INSUFFICIENT_FUNDS` — No eligible account with sufficient balance after routing';
 
-  const r = parseSlackAlert(text, TS, IF_CHANNEL)[0];
+  const rows = parseSlackAlert(text, TS, IF_CHANNEL);
+  assert.ok(rows && rows.length === 1, 'expected parse rows');
+  const r = rows[0];
   assert.strictEqual(r.Token, 'B-S-HBAR_USDT');
   assert.strictEqual(r.Exchange, 'Binance');
+  assert.strictEqual(r.Side, 'sell');
+  assert.strictEqual(r.Qty, '212476');
+  assert.strictEqual(r.OrderId, '1107579126');
+  assert.strictEqual(r.Account, 'all');
   assert.strictEqual(r.ErrorCode, 'INSUFFICIENT_FUNDS');
+  assert.ok(r.Response.indexOf('INSUFFICIENT_FUNDS') !== -1);
   assert.ok(r.Response.toLowerCase().indexOf('no eligible account') !== -1);
+  assert.ok(AlertFilters.shouldKeepAlert(r));
+});
+
+run('parses bullet lines without backticks / with bold labels', function () {
+  const text = [
+    '[SPOT][PRODUCTION][INSUFFICIENT_FUNDS] Order rejected on Binance',
+    '• *Exchange*: Binance',
+    '• *Symbol*: B-S-HBAR_USDT',
+    '• *Side*: SELL',
+    '• *Qty*: 212476',
+    '• *OrderId*: 1107573262',
+    '• *Account*: all',
+    '• *Env*: Mercury-Production',
+    '• *Error*: INSUFFICIENT_FUNDS — No eligible account with sufficient balance after routing'
+  ].join('\n');
+
+  const r = parseSlackAlert(text, TS, IF_CHANNEL)[0];
+  assert.strictEqual(r.Token, 'B-S-HBAR_USDT');
+  assert.strictEqual(r.Side, 'sell');
+  assert.strictEqual(r.OrderId, '1107573262');
   assert.ok(AlertFilters.shouldKeepAlert(r));
 });
 

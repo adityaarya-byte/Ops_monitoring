@@ -20,7 +20,6 @@ const INSUFFICIENT_KEYWORDS = [
 ];
 
 const ParserUtils = {
-  /** Keep full instrument symbols (e.g. B-S-HBAR_USDT). Do not strip prefixes. */
   cleanSymbol: function (sym) {
     if (!sym) return '';
     return ParserUtils.cleanField(String(sym));
@@ -35,7 +34,8 @@ const ParserUtils = {
     if (!val) return '';
     return String(val)
       .replace(/\*+/g, '')
-      .replace(/^[`'"\s]+|[`'"\s]+$/g, '')
+      .replace(/`/g, '')
+      .replace(/^['"\s]+|['"\s]+$/g, '')
       .trim();
   },
 
@@ -47,7 +47,9 @@ const ParserUtils = {
   normalizeAlertText: function (text) {
     return String(text || '')
       .replace(/\r\n/g, '\n')
+      .replace(/^[ \t]*[•\u2022\u2023\u25E6\u2043▪▸►*-]+\s*/gm, '')
       .replace(/[•\u2022\u2023]/g, '\n')
+      .replace(/\*([A-Za-z0-9_/ ]+)\*/g, '$1')
       .replace(/\n+/g, '\n')
       .trim();
   },
@@ -61,18 +63,41 @@ const ParserUtils = {
       .trim();
   },
 
+  extractLabeledFields: function (text) {
+    const fields = {};
+    const normalized = ParserUtils.normalizeAlertText(text);
+    normalized.split('\n').forEach(function (rawLine) {
+      var line = String(rawLine || '').trim();
+      if (!line) return;
+      line = line.replace(/^[•\u2022\u2023*\-\s]+/, '');
+      const m = line.match(
+        /^\*?((?:Instrument\/Symbol)|Symbol|Exchange|Side|Qty|OrderId|Account|Env|Error)\*?\s*:\s*(.+)$/i
+      );
+      if (!m) return;
+      const key = m[1].toLowerCase();
+      var val = m[2].trim().replace(/^`(.+)`$/, '$1').trim();
+      fields[key] = ParserUtils.cleanField(val);
+    });
+    return fields;
+  },
+
   extractField: function (text, labels) {
+    const map = ParserUtils.extractLabeledFields(text);
     const labelList = Array.isArray(labels) ? labels : [labels];
+    for (var i = 0; i < labelList.length; i++) {
+      const key = String(labelList[i]).toLowerCase();
+      if (map[key]) return map[key];
+    }
+
     const nextLabels =
       'Exchange|Instrument\\/Symbol|Symbol|Side|Qty|OrderId|Account|Env|Error|Details|Format|Channel';
-
-    for (var i = 0; i < labelList.length; i++) {
-      const label = labelList[i].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    for (var j = 0; j < labelList.length; j++) {
+      const label = labelList[j].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const re = new RegExp(
-        '(?:^|[\\n\\r*]|\\s)' + label + '\\s*:\\s*`?\\*?\\s*' +
+        '(?:^|[\\n\\r]|\\s)\\*?\\s*' + label + '\\*?\\s*:\\s*`?\\*?\\s*' +
           '([^\\n\\r`]+?)' +
           '\\s*`?\\*?\\s*' +
-          '(?=\\s*(?:\\n|$|(?:' + nextLabels + ')\\s*:))',
+          '(?=\\s*(?:\\n|$|\\*?\\s*(?:' + nextLabels + ')\\*?\\s*:))',
         'i'
       );
       const m = text.match(re);
@@ -84,16 +109,29 @@ const ParserUtils = {
   },
 
   extractError: function (text) {
+    const map = ParserUtils.extractLabeledFields(text);
+    if (map.error) {
+      const full = map.error;
+      const split = full.match(/^`?(-?\d+|[A-Za-z0-9_]+)?`?\s*[\u2014\-\u2013]+\s*(.+)$/);
+      if (split) {
+        return {
+          code: split[1] ? ParserUtils.cleanField(split[1]) : '',
+          response: ParserUtils.cleanField(full)
+        };
+      }
+      return { code: '', response: ParserUtils.cleanField(full) };
+    }
+
     const errMatch = text.match(
-      /Error:\s*`?(-?\d+|[A-Za-z0-9_]+)?`?\s*[\u2014\-\u2013]+\s*([^\n\r`{]*)/i
+      /Error:\s*`?(-?\d+|[A-Za-z0-9_]+)?`?\s*([\u2014\-\u2013]+)\s*([^\n\r`{]*)/i
     );
     if (!errMatch) {
       return { code: '', response: '' };
     }
-    return {
-      code: errMatch[1] ? ParserUtils.cleanField(errMatch[1]) : '',
-      response: ParserUtils.cleanField(errMatch[2] || '')
-    };
+    const code = errMatch[1] ? ParserUtils.cleanField(errMatch[1]) : '';
+    const msg = ParserUtils.cleanField(errMatch[3] || '');
+    const response = code && msg ? (code + ' ' + errMatch[2] + ' ' + msg) : (msg || code);
+    return { code: code, response: ParserUtils.cleanField(response) };
   },
 
   extractMsgFromDetails: function (text) {
@@ -152,11 +190,6 @@ const AlertFilters = {
     return false;
   },
 
-  /**
-   * Keep rules:
-   *  - cb-order-rejection: ONLY "The market is too volatile..."
-   *  - all other channels: ONLY insufficient / balance keywords
-   */
   shouldKeepAlert: function (item) {
     if (!item) return false;
     if (AlertFilters.isCbChannel(item.Channel) || item.Format === 'CB-Digest') {
@@ -166,12 +199,6 @@ const AlertFilters = {
   }
 };
 
-/**
- * @param {string} rawText
- * @param {Date|string|number} timestamp
- * @param {string} channelName
- * @param {{ formatDate?: Function }} [helpers]
- */
 function parseSlackAlert(rawText, timestamp, channelName, helpers) {
   if (!rawText || !String(rawText).trim()) return null;
   const text = String(rawText).trim();
@@ -193,7 +220,6 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
     };
 
   try {
-    // FORMAT A/B: Key-Value / bullet-list
     if (/OrderId\s*:/i.test(text) || /Order rejected on/i.test(text)) {
       var exchange =
         ParserUtils.extractField(normalized, ['Exchange']) ||
@@ -258,8 +284,6 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
       }
     }
 
-    // FORMAT G: Production Binance MANTAUSDT sell 7743.5 order <uuid>, Account: ..., rejected: response {...}
-    // e.g. Production Binance MANTAUSDT sell 7743.5 order 335b21d2-..., Account: account_6, rejected: response {"code"=>-2010, "msg"=>"..."}
     {
       const inline = clean.match(
         /(?:Production|Mercury-Production)?\s*([A-Za-z0-9_.-]+)\s+([A-Za-z0-9_-]+)\s+(buy|sell)\s+([\d.]+)\s+order\s+([A-Za-z0-9-]+)/i
@@ -288,7 +312,6 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
       }
     }
 
-    // FORMAT C: Inline Insufficient Balance
     if (/Insufficient balance for \S+ accounts:/i.test(clean)) {
       const m = clean.match(
         /Insufficient balance for \S+ accounts:\s*(\S+)\s*-\s*(\d+)\s+([A-Z0-9_]+)-[A-Z0-9]+-([A-Z0-9_]+)\s+(BUY|SELL)\s+([\d.]+)/i
@@ -312,7 +335,6 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
       }
     }
 
-    // FORMAT D: Mercury-Action JSON Failure (incl. Gateio InsufficientFunds)
     if (/Could not \w+ order on/i.test(text)) {
       const exchangeMatch = text.match(/Could not \w+ order on (\w+)/i);
       var orderObj = {};
@@ -357,7 +379,6 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
       }];
     }
 
-    // FORMAT E: Exchange-Funds Futures JSON Rejection
     if (/Order rejected:/i.test(text) && /Instrument:/i.test(text)) {
       const orderIdMatch = text.match(/Order rejected:\s*(\S+)/i);
       const instrumentMatch = text.match(/Instrument:\s*(\S+)/i);
@@ -379,7 +400,6 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
       }];
     }
 
-    // FORMAT F: cb-order-rejection rollup digest — ONLY volatile-market lines
     if (
       AlertFilters.isCbChannel(channelName) ||
       /Insta\s*\/\s*OTC Order Rejections/i.test(text) ||
@@ -399,7 +419,6 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
         const side = tokenSide[1].toLowerCase();
         if (side !== 'buy' && side !== 'sell') return;
         const reason = parts[1].trim();
-        // Drop insufficient funds / something went wrong / everything except volatile
         if (!AlertFilters.isVolatileReason(reason)) return;
         const userStr = parts[2].trim();
         const userId = userStr.startsWith('user ') ? userStr.substring(5).trim() : userStr;
@@ -432,7 +451,6 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
     }
   }
 
-  // Unmatched → null (do not stage junk rows as "Order rejected" / UNMATCHED)
   return null;
 }
 

@@ -211,12 +211,13 @@ const ParserUtils = {
     return str.toString().replace(/[^\d.\-E+]/g, '');
   },
 
-  /** Strip Slack bold/italic asterisks and surrounding quotes/backticks. */
+  /** Strip Slack bold/italic asterisks and backticks from field values. */
   cleanField: function (val) {
     if (!val) return '';
     return String(val)
       .replace(/\*+/g, '')
-      .replace(/^[`'"\s]+|[`'"\s]+$/g, '')
+      .replace(/`/g, '')
+      .replace(/^['"\s]+|['"\s]+$/g, '')
       .trim();
   },
 
@@ -228,23 +229,58 @@ const ParserUtils = {
   normalizeAlertText: function (text) {
     return String(text || '')
       .replace(/\r\n/g, '\n')
+      // Drop leading bullets on each line: • Symbol: ... → Symbol: ...
+      .replace(/^[ \t]*[•\u2022\u2023\u25E6\u2043▪▸►*-]+\s*/gm, '')
+      // Mid-line bullets (single-line webhook payloads) → newlines
       .replace(/[•\u2022\u2023]/g, '\n')
+      // Slack bold labels: *Symbol* → Symbol
+      .replace(/\*([A-Za-z0-9_/ ]+)\*/g, '$1')
       .replace(/\n+/g, '\n')
       .trim();
   },
 
+  /**
+   * Line-oriented field map — ignores • / bullets / backticks / *bold*.
+   * Keys lowercased without spaces: symbol, instrument/symbol, exchange, ...
+   */
+  extractLabeledFields: function (text) {
+    const fields = {};
+    const normalized = ParserUtils.normalizeAlertText(text);
+    normalized.split('\n').forEach(function (rawLine) {
+      var line = String(rawLine || '').trim();
+      if (!line) return;
+      line = line.replace(/^[•\u2022\u2023*\-\s]+/, '');
+      const m = line.match(
+        /^\*?((?:Instrument\/Symbol)|Symbol|Exchange|Side|Qty|OrderId|Account|Env|Error)\*?\s*:\s*(.+)$/i
+      );
+      if (!m) return;
+      const key = m[1].toLowerCase();
+      var val = m[2].trim();
+      // Strip wrapping backticks around the whole value
+      val = val.replace(/^`(.+)`$/, '$1').trim();
+      fields[key] = ParserUtils.cleanField(val);
+    });
+    return fields;
+  },
+
   extractField: function (text, labels) {
+    // Prefer line-map (handles • bullets reliably), then regex fallback
+    const map = ParserUtils.extractLabeledFields(text);
     const labelList = Array.isArray(labels) ? labels : [labels];
+    for (var i = 0; i < labelList.length; i++) {
+      const key = String(labelList[i]).toLowerCase();
+      if (map[key]) return map[key];
+    }
+
     const nextLabels =
       'Exchange|Instrument\\/Symbol|Symbol|Side|Qty|OrderId|Account|Env|Error|Details|Format|Channel';
-
-    for (var i = 0; i < labelList.length; i++) {
-      const label = labelList[i].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    for (var j = 0; j < labelList.length; j++) {
+      const label = labelList[j].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const re = new RegExp(
-        '(?:^|[\\n\\r*]|\\s)' + label + '\\s*:\\s*`?\\*?\\s*' +
+        '(?:^|[\\n\\r]|\\s)\\*?\\s*' + label + '\\*?\\s*:\\s*`?\\*?\\s*' +
           '([^\\n\\r`]+?)' +
           '\\s*`?\\*?\\s*' +
-          '(?=\\s*(?:\\n|$|(?:' + nextLabels + ')\\s*:))',
+          '(?=\\s*(?:\\n|$|\\*?\\s*(?:' + nextLabels + ')\\*?\\s*:))',
         'i'
       );
       const m = text.match(re);
@@ -265,16 +301,30 @@ const ParserUtils = {
   },
 
   extractError: function (text) {
+    // Prefer line map value: "INSUFFICIENT_FUNDS — No eligible account..."
+    const map = ParserUtils.extractLabeledFields(text);
+    if (map.error) {
+      const full = map.error;
+      const split = full.match(/^`?(-?\d+|[A-Za-z0-9_]+)?`?\s*[\u2014\-\u2013]+\s*(.+)$/);
+      if (split) {
+        return {
+          code: split[1] ? ParserUtils.cleanField(split[1]) : '',
+          response: ParserUtils.cleanField(full) // keep full "CODE — message"
+        };
+      }
+      return { code: '', response: ParserUtils.cleanField(full) };
+    }
+
     const errMatch = text.match(
-      /Error:\s*`?(-?\d+|[A-Za-z0-9_]+)?`?\s*[\u2014\-\u2013]+\s*([^\n\r`{]*)/i
+      /Error:\s*`?(-?\d+|[A-Za-z0-9_]+)?`?\s*([\u2014\-\u2013]+)\s*([^\n\r`{]*)/i
     );
     if (!errMatch) {
       return { code: '', response: '' };
     }
-    return {
-      code: errMatch[1] ? ParserUtils.cleanField(errMatch[1]) : '',
-      response: ParserUtils.cleanField(errMatch[2] || '')
-    };
+    const code = errMatch[1] ? ParserUtils.cleanField(errMatch[1]) : '';
+    const msg = ParserUtils.cleanField(errMatch[3] || '');
+    const response = code && msg ? (code + ' ' + errMatch[2] + ' ' + msg) : (msg || code);
+    return { code: code, response: ParserUtils.cleanField(response) };
   },
 
   extractMsgFromDetails: function (text) {
@@ -584,6 +634,77 @@ function parseSlackAlert(rawText, timestamp, channelName) {
 // SECTION 4: PIPELINE EXECUTOR
 // ============================================================================
 
+/**
+ * Webhooks often put the real body in attachments/blocks, not msg.text.
+ * Without this, bullet alerts (• Symbol: B-S-HBAR_USDT) are skipped entirely.
+ */
+function extractSlackMessageText(msg) {
+  if (!msg) return '';
+  const parts = [];
+  function push(s) {
+    if (s == null) return;
+    const t = String(s).trim();
+    if (t) parts.push(t);
+  }
+
+  push(msg.text);
+
+  if (msg.attachments && msg.attachments.length) {
+    msg.attachments.forEach(function (a) {
+      push(a.pretext);
+      push(a.title);
+      push(a.text);
+      push(a.fallback);
+      if (a.fields && a.fields.length) {
+        a.fields.forEach(function (f) {
+          if (f && (f.title || f.value)) {
+            push(String(f.title || '') + ': ' + String(f.value || ''));
+          }
+        });
+      }
+    });
+  }
+
+  function flattenRichText(elements) {
+    if (!elements || !elements.length) return '';
+    var out = '';
+    elements.forEach(function (el) {
+      if (!el) return;
+      if (el.text) out += el.text;
+      if (el.elements) out += flattenRichText(el.elements);
+      if (el.type === 'rich_text_section' || el.type === 'rich_text_list') {
+        out += flattenRichText(el.elements);
+        if (el.type === 'rich_text_list') out += '\n';
+      }
+    });
+    return out;
+  }
+
+  if (msg.blocks && msg.blocks.length) {
+    msg.blocks.forEach(function (b) {
+      if (!b) return;
+      if (b.text && b.text.text) push(b.text.text);
+      if (b.fields && b.fields.length) {
+        b.fields.forEach(function (f) {
+          if (f && f.text) push(f.text);
+        });
+      }
+      if (b.type === 'rich_text') push(flattenRichText(b.elements));
+    });
+  }
+
+  // De-dupe identical chunks (text often equals attachment fallback)
+  const seen = {};
+  const uniq = [];
+  parts.forEach(function (p) {
+    if (!seen[p]) {
+      seen[p] = true;
+      uniq.push(p);
+    }
+  });
+  return uniq.join('\n').trim();
+}
+
 /** Stage 1: Fetch Slack Messages with Self-Healing lookback window + Dedup */
 function fetchSlackMessages() {
   const token = PropertiesService.getScriptProperties().getProperty(CONFIG.SLACK_BOT_TOKEN_PROP);
@@ -649,7 +770,8 @@ function fetchSlackMessages() {
       }
 
       (body.messages || []).forEach(function (msg) {
-        if (!msg.text || !msg.text.trim()) return;
+        const rawText = extractSlackMessageText(msg);
+        if (!rawText) return;
         if (existingIds[msg.ts]) return;
         existingIds[msg.ts] = true;
 
@@ -657,7 +779,7 @@ function fetchSlackMessages() {
           message_id: msg.ts,
           channel_id: channel.id,
           channel_name: channel.name,
-          raw_text: msg.text,
+          raw_text: rawText,
           posted_at: new Date(parseFloat(msg.ts) * 1000),
           fetched_at: new Date(),
           status: 'PENDING',
