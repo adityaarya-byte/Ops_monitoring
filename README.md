@@ -9,12 +9,25 @@ Google Apps Script pipeline that fetches Slack rejection alerts, parses them int
 3. Confirm Script Property `TOKEN` holds the Slack bot token.
 4. Run `setupSheets()`, then `installTrigger()` (every 5 minutes) or `fetchAndProcessPipeline()` once.
 
-## V2.2 fixes
+## Allowlist (V2.3)
 
-- **Frozen-row crash**: raw staging clear uses `clearContent` instead of `deleteRows` (avoids *Sorry, it is not possible to delete all non-frozen rows*).
-- **Channel naming**: `C0BDYE1RQTH` is tracked as `insufficient-funds-rails-mercury-rejections`.
-- **Symbol parsing**: keeps full instruments such as `B-S-HBAR_USDT` (no `B-S-` strip).
-- **Slack markdown**: strips `*` / backticks from field values; supports bullet and single-line label formats.
+| Channel | Kept reasons |
+|---|---|
+| `cb-order-rejection` (`C0BCN9QG679`) | Only *The market is too volatile right now. Please try again later* |
+| All other channels | Only insufficient / balance keywords (`insufficient`, `not enough balance`, `BALANCE_NOT_ENOUGH`, etc.) |
+
+## V2.3 fixes
+
+- CB digest drops `insufficient funds`, `something went wrong`, and any non-volatile reason.
+- Non-CB channels drop fill-timeout / generic “Order action failed” / etc.
+- Parses `Production Binance MANTAUSDT sell … rejected: response {…}` and Gateio `InsufficientFunds` CREATE failures.
+- Parses `Instrument/Symbol: SAPIENUSDT` and `Symbol: B-S-HBAR_USDT` with full token + real insufficient reason (not blank / “Order rejected”).
+
+## Deploy / rebuild
+
+1. Paste [`apps-script/Code.gs`](apps-script/Code.gs) into the bound Apps Script project.
+2. Run **`resetAndRebuildAllowlistedAlerts()`** once — clears stale transform/alerts, resets Slack cursors, and rebuilds from the last 48h with the allowlist applied.
+3. Or run `setupSheets()` then `fetchAndProcessPipeline()` if you prefer not to wipe history.
 
 ## Tests
 

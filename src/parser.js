@@ -1,9 +1,23 @@
 /**
  * Slack rejection-alert parser (Node-testable core).
- * Keep in sync with apps-script/Code.gs parseSlackAlert / ParserUtils.
+ * Keep in sync with apps-script/Code.gs parseSlackAlert / ParserUtils / AlertFilters.
  */
 
-const CB_CHANNEL_NAME = 'CB-Rejection';
+const CB_CHANNEL_NAME = 'cb-order-rejection';
+
+const CB_VOLATILE_REASON =
+  'the market is too volatile right now. please try again later';
+
+const INSUFFICIENT_KEYWORDS = [
+  'insufficient',
+  'not enough balance',
+  'balance_not_enough',
+  'balance not enough',
+  'insufficientfunds',
+  'insufficient_funds',
+  'no eligible account with sufficient balance',
+  'balance insufficient'
+];
 
 const ParserUtils = {
   /** Keep full instrument symbols (e.g. B-S-HBAR_USDT). Do not strip prefixes. */
@@ -17,7 +31,6 @@ const ParserUtils = {
     return str.toString().replace(/[^\d.\-E+]/g, '');
   },
 
-  /** Strip Slack bold/italic asterisks and surrounding whitespace. */
   cleanField: function (val) {
     if (!val) return '';
     return String(val)
@@ -31,11 +44,6 @@ const ParserUtils = {
     return str.replace(/[`*]/g, ' ').replace(/\s+/g, ' ').trim();
   },
 
-  /**
-   * Normalize Slack alert text so labeled fields are easier to extract:
-   * - bullets become newlines
-   * - collapse odd spacing around labels
-   */
   normalizeAlertText: function (text) {
     return String(text || '')
       .replace(/\r\n/g, '\n')
@@ -44,10 +52,15 @@ const ParserUtils = {
       .trim();
   },
 
-  /**
-   * Extract a labeled field value. Stops before the next known label, newline, or end.
-   * Handles: Symbol: X | Symbol: `X` | *Symbol: X* | Symbol: *X*
-   */
+  normalizeReason: function (reason) {
+    return String(reason || '')
+      .toLowerCase()
+      .replace(/\*+/g, '')
+      .replace(/[.`]+$/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  },
+
   extractField: function (text, labels) {
     const labelList = Array.isArray(labels) ? labels : [labels];
     const nextLabels =
@@ -71,9 +84,6 @@ const ParserUtils = {
   },
 
   extractError: function (text) {
-    // Error: -2010 — message
-    // Error: `INSUFFICIENT_FUNDS` — message
-    // Error:  —  (empty code)
     const errMatch = text.match(
       /Error:\s*`?(-?\d+|[A-Za-z0-9_]+)?`?\s*[\u2014\-\u2013]+\s*([^\n\r`{]*)/i
     );
@@ -84,6 +94,75 @@ const ParserUtils = {
       code: errMatch[1] ? ParserUtils.cleanField(errMatch[1]) : '',
       response: ParserUtils.cleanField(errMatch[2] || '')
     };
+  },
+
+  extractMsgFromDetails: function (text) {
+    const msgM = text.match(/"msg"\s*(?:=>|=&gt;|:)\s*"([^"]+)"/i);
+    return msgM ? msgM[1] : '';
+  },
+
+  extractInsufficientMessage: function (text) {
+    const fromMsg = ParserUtils.extractMsgFromDetails(text);
+    if (fromMsg) return fromMsg;
+
+    const nested = text.match(
+      /"message"\s*:\s*"(?:gate\s*)?\{[^"]*"message"\s*:\s*"([^"]+)"/i
+    );
+    if (nested) return nested[1];
+
+    const plain = text.match(/"message"\s*:\s*"([^"]*(?:not enough balance|insufficient)[^"]*)"/i);
+    if (plain) return plain[1];
+
+    if (/BALANCE_NOT_ENOUGH|InsufficientFunds|Not enough balance/i.test(text)) {
+      return 'Not enough balance';
+    }
+    return '';
+  }
+};
+
+const AlertFilters = {
+  isCbChannel: function (channelName) {
+    const n = String(channelName || '').toLowerCase().trim();
+    return (
+      n === CB_CHANNEL_NAME ||
+      n === 'cb-rejection' ||
+      n === 'cb-order-rejection' ||
+      n.indexOf('cb-order-rejection') !== -1 ||
+      n.indexOf('cb-rejection') !== -1
+    );
+  },
+
+  isVolatileReason: function (reason) {
+    const r = ParserUtils.normalizeReason(reason);
+    return r === CB_VOLATILE_REASON || r.indexOf(CB_VOLATILE_REASON) !== -1;
+  },
+
+  isInsufficientReason: function (item) {
+    const hay = [
+      item && item.Response,
+      item && item.ErrorCode,
+      item && item.RawText,
+      item && item.reason
+    ]
+      .join(' ')
+      .toLowerCase();
+    for (var i = 0; i < INSUFFICIENT_KEYWORDS.length; i++) {
+      if (hay.indexOf(INSUFFICIENT_KEYWORDS[i]) !== -1) return true;
+    }
+    return false;
+  },
+
+  /**
+   * Keep rules:
+   *  - cb-order-rejection: ONLY "The market is too volatile..."
+   *  - all other channels: ONLY insufficient / balance keywords
+   */
+  shouldKeepAlert: function (item) {
+    if (!item) return false;
+    if (AlertFilters.isCbChannel(item.Channel) || item.Format === 'CB-Digest') {
+      return AlertFilters.isVolatileReason(item.Response || item.reason);
+    }
+    return AlertFilters.isInsufficientReason(item);
   }
 };
 
@@ -91,7 +170,7 @@ const ParserUtils = {
  * @param {string} rawText
  * @param {Date|string|number} timestamp
  * @param {string} channelName
- * @param {{ formatDate?: Function }} [helpers] - optional GAS Utilities.formatDate shim
+ * @param {{ formatDate?: Function }} [helpers]
  */
 function parseSlackAlert(rawText, timestamp, channelName, helpers) {
   if (!rawText || !String(rawText).trim()) return null;
@@ -114,7 +193,7 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
     };
 
   try {
-    // FORMAT A/B: Key-Value / bullet-list (OrderId present or "Order rejected on")
+    // FORMAT A/B: Key-Value / bullet-list
     if (/OrderId\s*:/i.test(text) || /Order rejected on/i.test(text)) {
       var exchange =
         ParserUtils.extractField(normalized, ['Exchange']) ||
@@ -129,39 +208,37 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
         ParserUtils.extractField(text, ['Instrument/Symbol', 'Symbol']);
       token = ParserUtils.cleanSymbol(token);
 
-      var side =
+      var side = ParserUtils.cleanField(
         ParserUtils.extractField(normalized, ['Side']) ||
-        ParserUtils.extractField(text, ['Side']);
-      side = ParserUtils.cleanField(side).toLowerCase();
+          ParserUtils.extractField(text, ['Side'])
+      ).toLowerCase();
 
       var qtyRaw =
         ParserUtils.extractField(normalized, ['Qty']) ||
         ParserUtils.extractField(text, ['Qty']);
       const qty = qtyRaw ? ParserUtils.cleanNumber(qtyRaw) : '';
 
-      var orderId =
+      var orderId = ParserUtils.cleanField(
         ParserUtils.extractField(normalized, ['OrderId']) ||
-        ParserUtils.extractField(text, ['OrderId']);
-      orderId = ParserUtils.cleanField(orderId);
+          ParserUtils.extractField(text, ['OrderId'])
+      );
 
-      var account =
+      var account = ParserUtils.cleanField(
         ParserUtils.extractField(normalized, ['Account']) ||
-        ParserUtils.extractField(text, ['Account']);
-      account = ParserUtils.cleanField(account);
+          ParserUtils.extractField(text, ['Account'])
+      );
 
       const err = ParserUtils.extractError(text);
       var errCode = err.code;
       var response = err.response;
 
       if (exchange && token && orderId) {
-        if (!response || response.trim() === '') {
-          const msgM = text.match(/"msg"\s*(?:=>|=&gt;|:)\s*"([^"]+)"/i);
-          if (msgM) {
-            response = msgM[1];
-          } else {
-            const statusM = text.match(/status:\s*:([A-Z_]+)/i);
-            response = statusM ? ('Order status: ' + statusM[1]) : 'Order rejected';
-          }
+        if (!response || response.trim() === '' || /^order rejected$/i.test(response)) {
+          const fromDetails =
+            ParserUtils.extractMsgFromDetails(text) ||
+            ParserUtils.extractInsufficientMessage(text);
+          if (fromDetails) response = fromDetails;
+          else if (!response) response = 'Order rejected';
         }
 
         return [{
@@ -175,6 +252,36 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
           ErrorCode: errCode,
           OrderId: orderId,
           Format: 'Key-Value',
+          Channel: channelName,
+          RawText: text
+        }];
+      }
+    }
+
+    // FORMAT G: Production Binance MANTAUSDT sell 7743.5 order <uuid>, Account: ..., rejected: response {...}
+    // e.g. Production Binance MANTAUSDT sell 7743.5 order 335b21d2-..., Account: account_6, rejected: response {"code"=>-2010, "msg"=>"..."}
+    {
+      const inline = clean.match(
+        /(?:Production|Mercury-Production)?\s*([A-Za-z0-9_.-]+)\s+([A-Za-z0-9_-]+)\s+(buy|sell)\s+([\d.]+)\s+order\s+([A-Za-z0-9-]+)/i
+      );
+      if (inline && /rejected:\s*response/i.test(text)) {
+        const accountMatch = text.match(/Account:\s*`?([^\s,`]+)`?/i);
+        const codeMatch = text.match(/"code"\s*(?:=>|=&gt;|:)\s*(-?\d+)/i);
+        const response =
+          ParserUtils.extractMsgFromDetails(text) ||
+          ParserUtils.extractInsufficientMessage(text) ||
+          'Order rejected';
+        return [{
+          Timestamp: timestamp,
+          Exchange: ParserUtils.cleanField(inline[1]),
+          Token: ParserUtils.cleanSymbol(inline[2]),
+          Side: ParserUtils.cleanField(inline[3]).toLowerCase(),
+          Qty: ParserUtils.cleanNumber(inline[4]),
+          Account: accountMatch ? ParserUtils.cleanField(accountMatch[1]) : '',
+          Response: response,
+          ErrorCode: codeMatch ? codeMatch[1] : '',
+          OrderId: ParserUtils.cleanField(inline[5]),
+          Format: 'Inline-Production',
           Channel: channelName,
           RawText: text
         }];
@@ -205,7 +312,7 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
       }
     }
 
-    // FORMAT D: Mercury-Action JSON Failure
+    // FORMAT D: Mercury-Action JSON Failure (incl. Gateio InsufficientFunds)
     if (/Could not \w+ order on/i.test(text)) {
       const exchangeMatch = text.match(/Could not \w+ order on (\w+)/i);
       var orderObj = {};
@@ -221,15 +328,28 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
       const orderId = orderObj.client_order_id
         ? String(orderObj.client_order_id)
         : (orderObj.id ? String(orderObj.id) : '');
+
+      var response =
+        ParserUtils.extractInsufficientMessage(text) ||
+        errObj.Description ||
+        errObj.Title ||
+        '';
+      var errCode = errObj.Code || '';
+      if (!errCode) {
+        if (/BALANCE_NOT_ENOUGH/i.test(text)) errCode = 'BALANCE_NOT_ENOUGH';
+        else if (/InsufficientFunds/i.test(text)) errCode = 'InsufficientFunds';
+      }
+      if (!response) response = 'Order action failed';
+
       return [{
         Timestamp: timestamp,
         Exchange: exchangeMatch ? exchangeMatch[1] : '',
         Token: orderObj.instrument_id ? ('instrument_' + orderObj.instrument_id) : '',
-        Side: orderObj.side ? orderObj.side.toLowerCase() : '',
+        Side: orderObj.side ? String(orderObj.side).toLowerCase() : '',
         Qty: orderObj.ordered_quantity !== undefined ? String(orderObj.ordered_quantity) : '',
         Account: orderObj.exchange_account_id !== undefined ? String(orderObj.exchange_account_id) : '',
-        Response: errObj.Description || errObj.Title || 'Order action failed',
-        ErrorCode: errObj.Code || '',
+        Response: response,
+        ErrorCode: errCode,
         OrderId: orderId,
         Format: 'JSON-Action',
         Channel: channelName,
@@ -259,9 +379,13 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
       }];
     }
 
-    // FORMAT F: CB-Rejection Rollup Digest
-    if (channelName === CB_CHANNEL_NAME || /Order Rejections/i.test(text)) {
-      const VOLATILE_REASON = 'the market is too volatile right now. please try again later';
+    // FORMAT F: cb-order-rejection rollup digest — ONLY volatile-market lines
+    if (
+      AlertFilters.isCbChannel(channelName) ||
+      /Insta\s*\/\s*OTC Order Rejections/i.test(text) ||
+      /Newly landed rejections/i.test(text) ||
+      /Order Rejections/i.test(text)
+    ) {
       const expandedRows = [];
       text.split('\n').forEach(function (line) {
         const stripped = line.replace(/`/g, '').trim();
@@ -275,7 +399,8 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
         const side = tokenSide[1].toLowerCase();
         if (side !== 'buy' && side !== 'sell') return;
         const reason = parts[1].trim();
-        if (reason.toLowerCase() !== VOLATILE_REASON) return;
+        // Drop insufficient funds / something went wrong / everything except volatile
+        if (!AlertFilters.isVolatileReason(reason)) return;
         const userStr = parts[2].trim();
         const userId = userStr.startsWith('user ') ? userStr.substring(5).trim() : userStr;
         const tsStr = parts[3].trim();
@@ -290,7 +415,7 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
           Side: side,
           Qty: '',
           Account: userId,
-          Response: reason,
+          Response: 'The market is too volatile right now. Please try again later',
           ErrorCode: '',
           OrderId: dedupKey,
           Format: 'CB-Digest',
@@ -307,20 +432,15 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
     }
   }
 
-  return [{
-    Timestamp: timestamp,
-    Exchange: '',
-    Token: '',
-    Side: '',
-    Qty: '',
-    Account: '',
-    Response: 'UNMATCHED FORMAT',
-    ErrorCode: '',
-    OrderId: '',
-    Format: 'UNMATCHED',
-    Channel: channelName,
-    RawText: text
-  }];
+  // Unmatched → null (do not stage junk rows as "Order rejected" / UNMATCHED)
+  return null;
 }
 
-module.exports = { ParserUtils, parseSlackAlert, CB_CHANNEL_NAME };
+module.exports = {
+  ParserUtils,
+  parseSlackAlert,
+  AlertFilters,
+  CB_CHANNEL_NAME,
+  CB_VOLATILE_REASON,
+  INSUFFICIENT_KEYWORDS
+};
