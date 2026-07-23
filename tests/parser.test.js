@@ -13,7 +13,23 @@ const {
 
 const IF_CHANNEL = 'insufficient-funds-rails-mercury-rejections';
 const CB_CHANNEL = CB_CHANNEL_NAME;
+const EXCHANGE_FUNDS = 'alerts-exchange-funds';
+const ACTION_MERCURY = 'alerts-action-required-mercury';
+const FUNDS_MERCURY = 'alerts-exchange-funds-mercury';
 const TS = new Date('2026-07-23T10:00:00Z');
+
+function formatDateLocal(d) {
+  const dt = new Date(d);
+  const pad = function (n) { return String(n).padStart(2, '0'); };
+  return (
+    dt.getFullYear() +
+    pad(dt.getMonth() + 1) +
+    pad(dt.getDate()) +
+    pad(dt.getHours()) +
+    pad(dt.getMinutes()) +
+    pad(dt.getSeconds())
+  );
+}
 
 function run(name, fn) {
   try {
@@ -114,7 +130,7 @@ run('parses Production Binance MANTAUSDT inline rejection', function () {
   assert.ok(AlertFilters.shouldKeepAlert(r));
 });
 
-run('parses Gateio Could not CREATE with InsufficientFunds', function () {
+run('parses Gateio Could not CREATE with InsufficientFunds → Token=trace_id', function () {
   const text =
     'Mercury-Production Could not CREATE order on Gateio - ' +
     '{"version":1,"is_deleted":false,"created_at":1781337153401,"updated_at":1781337153401,' +
@@ -129,8 +145,10 @@ run('parses Gateio Could not CREATE with InsufficientFunds', function () {
     '{ description : rpc error: code = Unknown desc = {"name":"InsufficientFunds",' +
     '"message":"gate {\\"label\\":\\"BALANCE_NOT_ENOUGH\\",\\"message\\":\\"Not enough balance\\"}"} }';
 
-  const r = parseSlackAlert(text, TS, 'Mercury')[0];
+  const r = parseSlackAlert(text, TS, ACTION_MERCURY)[0];
   assert.strictEqual(r.Exchange, 'Gateio');
+  assert.strictEqual(r.Format, 'JSON-Action');
+  assert.strictEqual(r.Token, 'a151b82a2ad446d2acd51c2d224df800');
   assert.strictEqual(r.Side, 'buy');
   assert.strictEqual(r.Qty, '800');
   assert.strictEqual(String(r.OrderId), '387518130');
@@ -139,6 +157,88 @@ run('parses Gateio Could not CREATE with InsufficientFunds', function () {
     'expected insufficient reason, got: ' + r.Response
   );
   assert.ok(AlertFilters.shouldKeepAlert(r));
+});
+
+run('INSTA ORDER_REJECTED with Error: 500000 — uses ruby :reason', function () {
+  const text =
+    '[INSTA] ORDER_REJECTED on KC\n' +
+    'Exchange: KC\n' +
+    'Instrument/Symbol: SAFEUSDT\n' +
+    'Side: BUY\n' +
+    'Qty: 10\n' +
+    'OrderId: ord-safe-1\n' +
+    'Account: insta\n' +
+    'Error: 500000 —\n' +
+    'Details:\n{:reason=>"Something went wrong", :code=>500000}';
+
+  const r = parseSlackAlert(text, TS, FUNDS_MERCURY)[0];
+  assert.strictEqual(r.Format, 'INSTA-Key-Value');
+  assert.strictEqual(r.Response, 'Something went wrong');
+  assert.strictEqual(r.Token, 'SAFEUSDT');
+  assert.strictEqual(r.Exchange, 'KC');
+  assert.ok(AlertFilters.shouldKeepAlert(r));
+});
+
+run('Insta.InternalTpOrder MYRIAINR → Insta-InternalTp', function () {
+  const text =
+    'Production For Insta.InternalTpOrder: Internal Exchange MYRIAINR sell Otc::Order did not succeeded, ' +
+    '{"orderId"=>"otp-123"}';
+
+  const rows = parseSlackAlert(text, TS, EXCHANGE_FUNDS);
+  assert.ok(rows && rows.length === 1);
+  const r = rows[0];
+  assert.strictEqual(r.Format, 'Insta-InternalTp');
+  assert.strictEqual(r.Token, 'MYRIAINR');
+  assert.strictEqual(r.Exchange, 'Internal');
+  assert.strictEqual(r.Side, 'sell');
+  assert.strictEqual(r.Response, 'Otc::Order did not succeeded');
+  assert.strictEqual(r.OrderId, 'otp-123');
+  assert.ok(AlertFilters.shouldKeepAlert(r));
+});
+
+run('Format C: Kucoin RAIN_USDT strips KC-S- prefix via tokenFromPrefixedInstrument', function () {
+  const text =
+    'Mercury-Production Insufficient balance for Kucoin accounts: all - 413779298 KC-S-RAIN_USDT SELL 27720';
+
+  const r = parseSlackAlert(text, TS, FUNDS_MERCURY)[0];
+  assert.strictEqual(r.Format, 'Inline-Text');
+  assert.strictEqual(r.Token, 'RAIN_USDT');
+  assert.strictEqual(r.Exchange, 'Kucoin');
+  assert.strictEqual(r.Side, 'sell');
+  assert.strictEqual(r.Qty, '27720');
+  assert.strictEqual(r.Account, '413779298');
+  const tsKey = formatDateLocal(TS);
+  assert.strictEqual(r.OrderId, 'RAIN_USDT_Kucoin_' + tsKey + '_C');
+  assert.ok(AlertFilters.shouldKeepAlert(r));
+});
+
+run('Format D: Binance CREATE uses trace_id token + insufficient message', function () {
+  const text =
+    'Could not CREATE order on Binance - ' +
+    '{"version":1,"trace_id":"trace-binance-abc","id":99,"client_order_id":"co-1",' +
+    '"instrument_id":12,"side":"SELL","ordered_quantity":5,"exchange_account_id":3}. ' +
+    '{"message":"binance Account has insufficient balance for requested action."}';
+
+  const r = parseSlackAlert(text, TS, ACTION_MERCURY)[0];
+  assert.strictEqual(r.Format, 'JSON-Action');
+  assert.strictEqual(r.Exchange, 'Binance');
+  assert.strictEqual(r.Token, 'trace-binance-abc');
+  assert.ok(r.Response.toLowerCase().indexOf('insufficient balance') !== -1);
+  assert.ok(AlertFilters.shouldKeepAlert(r));
+});
+
+run('Format D: Coindcx CREATE returns null', function () {
+  const text =
+    'Could not CREATE order on Coindcx - ' +
+    '{"version":1,"trace_id":"trace-cdc","client_order_id":"x","side":"BUY","ordered_quantity":1}';
+  assert.strictEqual(parseSlackAlert(text, TS, ACTION_MERCURY), null);
+});
+
+run('Futures Order rejected on alerts-exchange-funds → null', function () {
+  const text =
+    'Production Futures Order rejected: abc123 Instrument: BTCUSDT ' +
+    '{"code"=>-2010, "msg"=>"Account has insufficient balance for requested action."}';
+  assert.strictEqual(parseSlackAlert(text, TS, EXCHANGE_FUNDS), null);
 });
 
 run('CB digest keeps only volatile lines; drops insufficient funds / something went wrong', function () {
@@ -163,10 +263,10 @@ run('CB digest keeps only volatile lines; drops insufficient funds / something w
   });
 });
 
-run('allowlist: non-CB non-insufficient reasons are dropped', function () {
+run('allowlist: per-channel keep rules', function () {
   assert.strictEqual(
     AlertFilters.shouldKeepAlert({
-      Channel: 'alerts-exchange-funds',
+      Channel: EXCHANGE_FUNDS,
       Response: 'Due to the order could not be filled immediately',
       ErrorCode: '',
       RawText: 'fill timeout'
@@ -175,7 +275,60 @@ run('allowlist: non-CB non-insufficient reasons are dropped', function () {
   );
   assert.strictEqual(
     AlertFilters.shouldKeepAlert({
-      Channel: 'alerts-action-required-mercury',
+      Channel: EXCHANGE_FUNDS,
+      Format: 'Insta-InternalTp',
+      Response: 'Otc::Order did not succeeded',
+      RawText: 'Insta.InternalTpOrder Otc::Order did not succeeded'
+    }),
+    true
+  );
+  assert.strictEqual(
+    AlertFilters.shouldKeepAlert({
+      Channel: EXCHANGE_FUNDS,
+      Response: 'x',
+      RawText: 'Futures Order rejected: 1'
+    }),
+    false
+  );
+  assert.strictEqual(
+    AlertFilters.shouldKeepAlert({
+      Channel: EXCHANGE_FUNDS,
+      Response: 'x',
+      RawText: 'Total unsettled Conversion order Requests: 3'
+    }),
+    false
+  );
+  assert.strictEqual(
+    AlertFilters.shouldKeepAlert({
+      Channel: FUNDS_MERCURY,
+      Response: 'Something went wrong',
+      RawText: 'ORDER_REJECTED'
+    }),
+    true
+  );
+  assert.strictEqual(
+    AlertFilters.shouldKeepAlert({
+      Channel: ACTION_MERCURY,
+      Format: 'JSON-Action',
+      Exchange: 'Binance',
+      Response: 'Order action failed',
+      RawText: 'Could not CREATE order on Binance'
+    }),
+    true
+  );
+  assert.strictEqual(
+    AlertFilters.shouldKeepAlert({
+      Channel: ACTION_MERCURY,
+      Format: 'JSON-Action',
+      Exchange: 'Coindcx',
+      Response: 'Order action failed',
+      RawText: 'Could not CREATE order on Coindcx'
+    }),
+    false
+  );
+  assert.strictEqual(
+    AlertFilters.shouldKeepAlert({
+      Channel: ACTION_MERCURY,
       Response: 'Order action failed',
       ErrorCode: '',
       RawText: 'Could not CREATE order'
@@ -188,6 +341,15 @@ run('allowlist: non-CB non-insufficient reasons are dropped', function () {
       Response: 'Account has insufficient balance for requested action.',
       ErrorCode: '-2010',
       RawText: 'INSUFFICIENT_FUNDS'
+    }),
+    true
+  );
+  assert.strictEqual(
+    AlertFilters.shouldKeepAlert({
+      Channel: IF_CHANNEL,
+      Response: 'Something went wrong',
+      ErrorCode: '500000',
+      RawText: 'ORDER_REJECTED'
     }),
     true
   );
@@ -220,9 +382,12 @@ run('allowlist: CB keeps volatile only', function () {
   );
 });
 
-run('cleanSymbol keeps B-S- prefix', function () {
+run('cleanSymbol keeps B-S- prefix; tokenFromPrefixedInstrument strips for Format C', function () {
   assert.strictEqual(ParserUtils.cleanSymbol('B-S-HBAR_USDT'), 'B-S-HBAR_USDT');
   assert.strictEqual(ParserUtils.cleanSymbol('*B-S-HBAR_USDT*'), 'B-S-HBAR_USDT');
+  assert.strictEqual(ParserUtils.tokenFromPrefixedInstrument('KC-S-RAIN_USDT'), 'RAIN_USDT');
+  assert.strictEqual(ParserUtils.tokenFromPrefixedInstrument('B-S-HBAR_USDT'), 'HBAR_USDT');
+  assert.strictEqual(ParserUtils.tokenFromPrefixedInstrument('SAFEUSDT'), 'SAFEUSDT');
 });
 
 run('unmatched non-alert text returns null (not UNMATCHED junk)', function () {

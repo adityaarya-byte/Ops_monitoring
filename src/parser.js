@@ -20,6 +20,7 @@ const INSUFFICIENT_KEYWORDS = [
 ];
 
 const ParserUtils = {
+  /** Keep full instrument symbols (e.g. B-S-HBAR_USDT). Do not strip B-S- prefixes. */
   cleanSymbol: function (sym) {
     if (!sym) return '';
     return ParserUtils.cleanField(String(sym));
@@ -30,6 +31,7 @@ const ParserUtils = {
     return str.toString().replace(/[^\d.\-E+]/g, '');
   },
 
+  /** Strip Slack bold/italic asterisks and backticks from field values. */
   cleanField: function (val) {
     if (!val) return '';
     return String(val)
@@ -47,22 +49,20 @@ const ParserUtils = {
   normalizeAlertText: function (text) {
     return String(text || '')
       .replace(/\r\n/g, '\n')
+      // Drop leading bullets on each line: • Symbol: ... → Symbol: ...
       .replace(/^[ \t]*[•\u2022\u2023\u25E6\u2043▪▸►*-]+\s*/gm, '')
+      // Mid-line bullets (single-line webhook payloads) → newlines
       .replace(/[•\u2022\u2023]/g, '\n')
+      // Slack bold labels: *Symbol* → Symbol
       .replace(/\*([A-Za-z0-9_/ ]+)\*/g, '$1')
       .replace(/\n+/g, '\n')
       .trim();
   },
 
-  normalizeReason: function (reason) {
-    return String(reason || '')
-      .toLowerCase()
-      .replace(/\*+/g, '')
-      .replace(/[.`]+$/g, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-  },
-
+  /**
+   * Line-oriented field map — ignores • / bullets / backticks / *bold*.
+   * Keys lowercased without spaces: symbol, instrument/symbol, exchange, ...
+   */
   extractLabeledFields: function (text) {
     const fields = {};
     const normalized = ParserUtils.normalizeAlertText(text);
@@ -75,13 +75,16 @@ const ParserUtils = {
       );
       if (!m) return;
       const key = m[1].toLowerCase();
-      var val = m[2].trim().replace(/^`(.+)`$/, '$1').trim();
+      var val = m[2].trim();
+      // Strip wrapping backticks around the whole value
+      val = val.replace(/^`(.+)`$/, '$1').trim();
       fields[key] = ParserUtils.cleanField(val);
     });
     return fields;
   },
 
   extractField: function (text, labels) {
+    // Prefer line-map (handles • bullets reliably), then regex fallback
     const map = ParserUtils.extractLabeledFields(text);
     const labelList = Array.isArray(labels) ? labels : [labels];
     for (var i = 0; i < labelList.length; i++) {
@@ -108,7 +111,17 @@ const ParserUtils = {
     return '';
   },
 
+  normalizeReason: function (reason) {
+    return String(reason || '')
+      .toLowerCase()
+      .replace(/\*+/g, '')
+      .replace(/[.`]+$/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  },
+
   extractError: function (text) {
+    // Prefer line map value: "INSUFFICIENT_FUNDS — No eligible account..."
     const map = ParserUtils.extractLabeledFields(text);
     if (map.error) {
       const full = map.error;
@@ -116,7 +129,7 @@ const ParserUtils = {
       if (split) {
         return {
           code: split[1] ? ParserUtils.cleanField(split[1]) : '',
-          response: ParserUtils.cleanField(full)
+          response: ParserUtils.cleanField(full) // keep full "CODE — message"
         };
       }
       return { code: '', response: ParserUtils.cleanField(full) };
@@ -139,9 +152,32 @@ const ParserUtils = {
     return msgM ? msgM[1] : '';
   },
 
+  /** Ruby hash :reason=>"Something went wrong" (INSTA ORDER_REJECTED Details) */
+  extractRubyReason: function (text) {
+    const m =
+      text.match(/:reason\s*=>\s*"([^"]+)"/i) ||
+      text.match(/["']reason["']\s*=>\s*"([^"]+)"/i) ||
+      text.match(/"reason"\s*:\s*"([^"]+)"/i);
+    return m ? ParserUtils.cleanField(m[1]) : '';
+  },
+
+  /**
+   * Instrument like KC-S-RAIN_USDT / B-S-HBAR_USDT → token after exchange-side prefix.
+   * SAFEUSDT (no prefix) returned as-is.
+   */
+  tokenFromPrefixedInstrument: function (sym) {
+    const s = ParserUtils.cleanField(sym);
+    const m = s.match(/^[A-Z0-9]+-[A-Z0-9]+-(.+)$/i);
+    return m ? ParserUtils.cleanField(m[1]) : s;
+  },
+
   extractInsufficientMessage: function (text) {
     const fromMsg = ParserUtils.extractMsgFromDetails(text);
     if (fromMsg) return fromMsg;
+
+    // "message":"binance Account has insufficient balance for requested action."
+    const plainFull = text.match(/"message"\s*:\s*"((?:binance|gate|kucoin|gateio)?[^"]*(?:insufficient|not enough balance|BALANCE_NOT_ENOUGH)[^"]*)"/i);
+    if (plainFull) return ParserUtils.cleanField(plainFull[1]);
 
     const nested = text.match(
       /"message"\s*:\s*"(?:gate\s*)?\{[^"]*"message"\s*:\s*"([^"]+)"/i
@@ -158,16 +194,20 @@ const ParserUtils = {
   }
 };
 
+/** Per-channel keep-rules for which parsed rows become alerts */
 const AlertFilters = {
   isCbChannel: function (channelName) {
     const n = String(channelName || '').toLowerCase().trim();
     return (
       n === CB_CHANNEL_NAME ||
       n === 'cb-rejection' ||
-      n === 'cb-order-rejection' ||
       n.indexOf('cb-order-rejection') !== -1 ||
       n.indexOf('cb-rejection') !== -1
     );
+  },
+
+  channelKey: function (channelName) {
+    return String(channelName || '').toLowerCase().trim();
   },
 
   isVolatileReason: function (reason) {
@@ -190,20 +230,64 @@ const AlertFilters = {
     return false;
   },
 
+  /**
+   * Channel rules:
+   *  - cb-order-rejection → volatile only
+   *  - insufficient-funds-rails-mercury-rejections → ALL parsed reasons
+   *  - alerts-exchange-funds-mercury → ALL parsed
+   *  - alerts-exchange-funds → Insta.InternalTpOrder only (drop Futures / unsettled conversion)
+   *  - alerts-action-required-mercury → non-Coindcx action failures
+   */
   shouldKeepAlert: function (item) {
     if (!item) return false;
-    if (AlertFilters.isCbChannel(item.Channel) || item.Format === 'CB-Digest') {
+    const ch = AlertFilters.channelKey(item.Channel);
+    const raw = String(item.RawText || '');
+    const ex = String(item.Exchange || '').toLowerCase();
+
+    if (AlertFilters.isCbChannel(ch) || item.Format === 'CB-Digest') {
       return AlertFilters.isVolatileReason(item.Response || item.reason);
     }
+
+    if (ch.indexOf('insufficient-funds-rails') !== -1) {
+      return true; // all reasons from this channel
+    }
+
+    if (ch === 'alerts-exchange-funds-mercury') {
+      return true; // all parsed alerts
+    }
+
+    if (ch === 'alerts-exchange-funds') {
+      if (/Futures\s+Order rejected:/i.test(raw)) return false;
+      if (/Total unsettled Conversion order Requests/i.test(raw)) return false;
+      if (item.Format === 'Insta-InternalTp') return true;
+      if (/Otc::Order did not succeeded/i.test(item.Response || '') || /Otc::Order did not succeeded/i.test(raw)) {
+        return true;
+      }
+      return false;
+    }
+
+    if (ch === 'alerts-action-required-mercury') {
+      if (/Could not \w+ order on\s+Coindcx/i.test(raw) || ex === 'coindcx') return false;
+      if (item.Format === 'JSON-Action') return true;
+      return AlertFilters.isInsufficientReason(item);
+    }
+
     return AlertFilters.isInsufficientReason(item);
   }
 };
 
+/**
+ * @param {string} rawText
+ * @param {Date|string|number} timestamp
+ * @param {string} channelName
+ * @param {{ formatDate?: (d: Date) => string }} [helpers]
+ */
 function parseSlackAlert(rawText, timestamp, channelName, helpers) {
   if (!rawText || !String(rawText).trim()) return null;
   const text = String(rawText).trim();
   const normalized = ParserUtils.normalizeAlertText(text);
   const clean = ParserUtils.stripMarkdown(text);
+  const ch = AlertFilters.channelKey(channelName);
   const formatDate =
     (helpers && helpers.formatDate) ||
     function (d) {
@@ -220,6 +304,38 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
     };
 
   try {
+    // Hard drops for alerts-exchange-funds (never stage)
+    if (ch === 'alerts-exchange-funds') {
+      if (/Futures\s+Order rejected:/i.test(text)) return null;
+      if (/Total unsettled Conversion order Requests/i.test(text)) return null;
+    }
+
+    // FORMAT H: Insta.InternalTpOrder (alerts-exchange-funds)
+    // Production For Insta.InternalTpOrder: Internal Exchange MYRIAINR sell Otc::Order did not succeeded, ...
+    if (/Insta\.InternalTpOrder/i.test(text) && /Otc::Order did not succeeded/i.test(text)) {
+      const m = text.match(
+        /Internal Exchange\s+([A-Za-z0-9_]+)\s+(buy|sell)\s+(Otc::Order did not succeeded)/i
+      );
+      if (m) {
+        const orderIdM = text.match(/"orderId"\s*=>\s*"([^"]+)"/i) || text.match(/order_id["']?\s*[:=]\s*["']([^"']+)/i);
+        return [{
+          Timestamp: timestamp,
+          Exchange: 'Internal',
+          Token: ParserUtils.cleanField(m[1]),
+          Side: ParserUtils.cleanField(m[2]).toLowerCase(),
+          Qty: '',
+          Account: 'insta',
+          Response: 'Otc::Order did not succeeded',
+          ErrorCode: '',
+          OrderId: orderIdM ? ParserUtils.cleanField(orderIdM[1]) : '',
+          Format: 'Insta-InternalTp',
+          Channel: channelName,
+          RawText: text
+        }];
+      }
+    }
+
+    // FORMAT A/B: Key-Value / bullet / INSTA ORDER_REJECTED
     if (/OrderId\s*:/i.test(text) || /Order rejected on/i.test(text)) {
       var exchange =
         ParserUtils.extractField(normalized, ['Exchange']) ||
@@ -232,6 +348,7 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
       var token =
         ParserUtils.extractField(normalized, ['Instrument/Symbol', 'Symbol']) ||
         ParserUtils.extractField(text, ['Instrument/Symbol', 'Symbol']);
+      // Keep full symbol for rails bullet (B-S-HBAR_USDT); SAFEUSDT stays as-is
       token = ParserUtils.cleanSymbol(token);
 
       var side = ParserUtils.cleanField(
@@ -259,10 +376,18 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
       var response = err.response;
 
       if (exchange && token && orderId) {
-        if (!response || response.trim() === '' || /^order rejected$/i.test(response)) {
+        // Prefer Details :reason=> when Error body blank (e.g. Error: 500000 —)
+        const rubyReason = ParserUtils.extractRubyReason(text);
+        const responseEmpty = !response ||
+          !String(response).replace(/[\d\s\u2014\-\u2013]/g, '').trim() ||
+          /^order rejected$/i.test(response);
+        if (rubyReason && responseEmpty) {
+          response = rubyReason;
+        } else if (responseEmpty) {
           const fromDetails =
             ParserUtils.extractMsgFromDetails(text) ||
-            ParserUtils.extractInsufficientMessage(text);
+            ParserUtils.extractInsufficientMessage(text) ||
+            rubyReason;
           if (fromDetails) response = fromDetails;
           else if (!response) response = 'Order rejected';
         }
@@ -277,13 +402,14 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
           Response: response,
           ErrorCode: errCode,
           OrderId: orderId,
-          Format: 'Key-Value',
+          Format: /\[INSTA\]/i.test(text) ? 'INSTA-Key-Value' : 'Key-Value',
           Channel: channelName,
           RawText: text
         }];
       }
     }
 
+    // FORMAT G: Production Binance MANTAUSDT sell ... order <id>, rejected: response {...}
     {
       const inline = clean.match(
         /(?:Production|Mercury-Production)?\s*([A-Za-z0-9_.-]+)\s+([A-Za-z0-9_-]+)\s+(buy|sell)\s+([\d.]+)\s+order\s+([A-Za-z0-9-]+)/i
@@ -312,22 +438,26 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
       }
     }
 
+    // FORMAT C: Mercury-Production Insufficient balance for Kucoin accounts: all - 413779298 KC-S-RAIN_USDT SELL 27720
     if (/Insufficient balance for \S+ accounts:/i.test(clean)) {
       const m = clean.match(
-        /Insufficient balance for \S+ accounts:\s*(\S+)\s*-\s*(\d+)\s+([A-Z0-9_]+)-[A-Z0-9]+-([A-Z0-9_]+)\s+(BUY|SELL)\s+([\d.]+)/i
+        /Insufficient balance for (\S+) accounts:\s*(\S+)\s*-\s*(\d+)\s+([A-Za-z0-9_-]+)\s+(BUY|SELL)\s+([\d.]+)/i
       );
       if (m) {
+        const exchangeName = ParserUtils.cleanField(m[1]); // Kucoin
+        const instrument = ParserUtils.cleanField(m[4]);   // KC-S-RAIN_USDT
+        const token = ParserUtils.tokenFromPrefixedInstrument(instrument); // RAIN_USDT
         const tsKey = formatDate(new Date(timestamp));
         return [{
           Timestamp: timestamp,
-          Exchange: ParserUtils.cleanField(m[3]),
-          Token: ParserUtils.cleanField(m[4]),
+          Exchange: exchangeName,
+          Token: token,
           Side: ParserUtils.cleanField(m[5]).toLowerCase(),
-          Qty: m[6],
-          Account: m[2],
+          Qty: ParserUtils.cleanNumber(m[6]),
+          Account: ParserUtils.cleanField(m[3]),
           Response: 'Insufficient balance',
           ErrorCode: '',
-          OrderId: m[4] + '_' + m[3] + '_' + tsKey + '_C',
+          OrderId: token + '_' + exchangeName + '_' + tsKey + '_C',
           Format: 'Inline-Text',
           Channel: channelName,
           RawText: text
@@ -335,38 +465,40 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
       }
     }
 
+    // FORMAT D: Could not CREATE/CANCEL order on Binance|Gateio|Kucoin (skip Coindcx via filter)
+    // Token = trace_id; reason = InsufficientFunds message
     if (/Could not \w+ order on/i.test(text)) {
       const exchangeMatch = text.match(/Could not \w+ order on (\w+)/i);
+      const exchangeName = exchangeMatch ? exchangeMatch[1] : '';
+      if (/^coindcx$/i.test(exchangeName)) return null;
+
       var orderObj = {};
-      var errObj = {};
-      const orderJsonMatch = text.match(/\{"version"[\s\S]*?\}/) || text.match(/\{[\s\S]*?\}/);
-      if (orderJsonMatch) {
-        try { orderObj = JSON.parse(orderJsonMatch[0]); } catch (e) { /* ignore */ }
-      }
-      const errJsonMatch = text.match(/\{"Code"[\s\S]*?\}/);
-      if (errJsonMatch) {
-        try { errObj = JSON.parse(errJsonMatch[0]); } catch (e) { /* ignore */ }
-      }
+      const orderJsonMatch = text.match(/\{"version"[\s\S]*?\}/);
+      if (orderJsonMatch) { try { orderObj = JSON.parse(orderJsonMatch[0]); } catch (e) { /* ignore */ } }
+
+      const traceId = orderObj.trace_id
+        ? String(orderObj.trace_id)
+        : (function () {
+            const tm = text.match(/"trace_id"\s*:\s*"([^"]+)"/i);
+            return tm ? tm[1] : '';
+          })();
       const orderId = orderObj.client_order_id
         ? String(orderObj.client_order_id)
         : (orderObj.id ? String(orderObj.id) : '');
 
-      var response =
-        ParserUtils.extractInsufficientMessage(text) ||
-        errObj.Description ||
-        errObj.Title ||
-        '';
-      var errCode = errObj.Code || '';
-      if (!errCode) {
-        if (/BALANCE_NOT_ENOUGH/i.test(text)) errCode = 'BALANCE_NOT_ENOUGH';
-        else if (/InsufficientFunds/i.test(text)) errCode = 'InsufficientFunds';
-      }
+      var response = ParserUtils.extractInsufficientMessage(text);
+      // Prefer full "binance Account has insufficient..." when present
+      const msgBinance = text.match(/"message"\s*:\s*"(binance [^"]+)"/i);
+      if (msgBinance) response = ParserUtils.cleanField(msgBinance[1]);
+      var errCode = '';
+      if (/BALANCE_NOT_ENOUGH/i.test(text)) errCode = 'BALANCE_NOT_ENOUGH';
+      else if (/InsufficientFunds/i.test(text)) errCode = 'InsufficientFunds';
       if (!response) response = 'Order action failed';
 
       return [{
         Timestamp: timestamp,
-        Exchange: exchangeMatch ? exchangeMatch[1] : '',
-        Token: orderObj.instrument_id ? ('instrument_' + orderObj.instrument_id) : '',
+        Exchange: exchangeName,
+        Token: traceId || (orderObj.instrument_id ? ('instrument_' + orderObj.instrument_id) : ''),
         Side: orderObj.side ? String(orderObj.side).toLowerCase() : '',
         Qty: orderObj.ordered_quantity !== undefined ? String(orderObj.ordered_quantity) : '',
         Account: orderObj.exchange_account_id !== undefined ? String(orderObj.exchange_account_id) : '',
@@ -379,7 +511,8 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
       }];
     }
 
-    if (/Order rejected:/i.test(text) && /Instrument:/i.test(text)) {
+    // FORMAT E: Futures / instrument JSON — only if NOT the blocked "Production Futures Order rejected"
+    if (/Order rejected:/i.test(text) && /Instrument:/i.test(text) && !/Futures\s+Order rejected:/i.test(text)) {
       const orderIdMatch = text.match(/Order rejected:\s*(\S+)/i);
       const instrumentMatch = text.match(/Instrument:\s*(\S+)/i);
       const codeMatch = text.match(/"code"\s*(?:=>|=&gt;|:)\s*(-?\d+)/i);
@@ -388,9 +521,7 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
         Timestamp: timestamp,
         Exchange: '',
         Token: instrumentMatch ? ParserUtils.cleanSymbol(instrumentMatch[1]) : '',
-        Side: '',
-        Qty: '',
-        Account: '',
+        Side: '', Qty: '', Account: '',
         Response: msgMatch ? msgMatch[1] : 'Order rejected',
         ErrorCode: codeMatch ? codeMatch[1] : '',
         OrderId: orderIdMatch ? orderIdMatch[1].trim() : '',
@@ -400,6 +531,7 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
       }];
     }
 
+    // FORMAT F: cb-order-rejection digest — ONLY volatile-market lines
     if (
       AlertFilters.isCbChannel(channelName) ||
       /Insta\s*\/\s*OTC Order Rejections/i.test(text) ||
