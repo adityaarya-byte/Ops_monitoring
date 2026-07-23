@@ -56,6 +56,11 @@ const CONFIG = {
   MAX_TRANSFORM_ROWS: 5000,
   MAX_TRANSFORM_CB_ROWS: 30000,
 
+  // Backfill window when cursors are missing/stale (testing = 7 days)
+  LOOKBACK_DAYS: 7,
+  // Time-driven trigger interval (Apps Script supports 1, 5, 10, 15, 30)
+  TRIGGER_MINUTES: 1,
+
   SLACK_API_BASE: 'https://slack.com/api/',
 
   // ✅ FIX 1: Use 'TOKEN' — matches the key already in your Script Properties
@@ -579,7 +584,7 @@ function parseSlackAlert(rawText, timestamp, channelName) {
 // SECTION 4: PIPELINE EXECUTOR
 // ============================================================================
 
-/** Stage 1: Fetch Slack Messages with Self-Healing 48h Window + Dedup */
+/** Stage 1: Fetch Slack Messages with Self-Healing lookback window + Dedup */
 function fetchSlackMessages() {
   const token = PropertiesService.getScriptProperties().getProperty(CONFIG.SLACK_BOT_TOKEN_PROP);
   if (!token) {
@@ -602,8 +607,10 @@ function fetchSlackMessages() {
       });
   }
 
-  const fortyEightHoursAgo = new Date(Date.now() - (48 * 60 * 60 * 1000));
-  const defaultOldestTs = (fortyEightHoursAgo.getTime() / 1000).toFixed(6);
+  const lookbackMs = (CONFIG.LOOKBACK_DAYS || 7) * 24 * 60 * 60 * 1000;
+  const lookbackStart = new Date(Date.now() - lookbackMs);
+  const defaultOldestTs = (lookbackStart.getTime() / 1000).toFixed(6);
+  Logger.log('📅 Fetch lookback: last ' + CONFIG.LOOKBACK_DAYS + ' day(s) (oldest ts=' + defaultOldestTs + ')');
 
   const newRows = [];
   var totalFetched = 0;
@@ -891,29 +898,37 @@ function installTrigger() {
   ScriptApp.getProjectTriggers().forEach(function (t) {
     if (t.getHandlerFunction() === 'fetchAndProcessPipeline') ScriptApp.deleteTrigger(t);
   });
-  ScriptApp.newTrigger('fetchAndProcessPipeline').timeBased().everyMinutes(5).create();
-  Logger.log('⏰ Pipeline trigger installed (every 5 minutes).');
+  const mins = CONFIG.TRIGGER_MINUTES || 1;
+  ScriptApp.newTrigger('fetchAndProcessPipeline').timeBased().everyMinutes(mins).create();
+  Logger.log('⏰ Pipeline trigger installed (every ' + mins + ' minute(s)).');
 }
 
-function resetSlackCursorsTo48Hours() {
+/** Clears cursors so the next fetch uses CONFIG.LOOKBACK_DAYS (currently 7). */
+function resetSlackCursors() {
   const props = PropertiesService.getScriptProperties();
   CONFIG.CHANNELS.forEach(function (c) { props.deleteProperty('CURSOR_' + c.id); });
-  Logger.log('🔄 Cursors reset — next run fetches last 48 hours.');
+  Logger.log('🔄 Cursors reset — next run fetches last ' + CONFIG.LOOKBACK_DAYS + ' day(s).');
+}
+
+/** @deprecated use resetSlackCursors */
+function resetSlackCursorsTo48Hours() {
+  resetSlackCursors();
 }
 
 /**
- * One-time cleanup after deploying V2.3:
- * clears transform buffers + alerts, resets cursors, and re-runs the pipeline
- * so only allowlisted reasons are rebuilt.
+ * One-time cleanup for testing:
+ * clears transform/alerts/raw, resets cursors (7-day lookback), runs pipeline once.
+ * Then run installTrigger() for every-1-minute incremental fetches.
  */
 function resetAndRebuildAllowlistedAlerts() {
   SheetService.clearSheetDataRows(CONFIG.SHEETS.TRANSFORM);
   SheetService.clearSheetDataRows(CONFIG.SHEETS.TRANSFORM_CB);
   SheetService.clearSheetDataRows(CONFIG.SHEETS.ALERTS);
   SheetService.clearSheetDataRows(CONFIG.SHEETS.RAW);
-  resetSlackCursorsTo48Hours();
+  resetSlackCursors();
   fetchAndProcessPipeline();
-  Logger.log('✅ Transform/alerts rebuilt with allowlisted reasons only.');
+  Logger.log('✅ Transform/alerts rebuilt with allowlisted reasons (lookback ' + CONFIG.LOOKBACK_DAYS + 'd).');
+  Logger.log('👉 Next: run installTrigger() for every-' + CONFIG.TRIGGER_MINUTES + '-minute fetches.');
 }
 
 /** Diagnostic: shows what token key is set and its first 10 chars */
@@ -921,8 +936,10 @@ function checkConfig() {
   const token = PropertiesService.getScriptProperties().getProperty(CONFIG.SLACK_BOT_TOKEN_PROP);
   Logger.log('Token key:   ' + CONFIG.SLACK_BOT_TOKEN_PROP);
   Logger.log('Token found: ' + (token ? 'YES (' + token.substring(0, 10) + '...)' : 'NO — run setSlackToken() or check Script Properties'));
+  Logger.log('Lookback:    ' + CONFIG.LOOKBACK_DAYS + ' day(s)');
+  Logger.log('Trigger:     every ' + CONFIG.TRIGGER_MINUTES + ' minute(s)');
   CONFIG.CHANNELS.forEach(function (c) {
     const cursor = PropertiesService.getScriptProperties().getProperty('CURSOR_' + c.id);
-    Logger.log('Cursor ' + c.name + ' (' + c.id + '): ' + (cursor || '(none — will use 48h window)'));
+    Logger.log('Cursor ' + c.name + ' (' + c.id + '): ' + (cursor || '(none — will use ' + CONFIG.LOOKBACK_DAYS + 'd window)'));
   });
 }
