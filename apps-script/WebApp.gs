@@ -82,6 +82,30 @@ function parseRange_(range, tz) {
   };
 }
 
+/** Map Rejection Type → dashboard bucket: cb | balance | other */
+function dashBucket_(rejType) {
+  if (rejType === 'CB Rejection') return 'cb';
+  if (rejType === 'Balance Rejection') return 'balance';
+  return 'other';
+}
+
+function emptyTrendBucket_() {
+  return { cb: 0, balance: 0, other: 0, cbOcc: 0, balanceOcc: 0, otherOcc: 0 };
+}
+
+function bumpTrend_(bucket, kind, occ) {
+  if (kind === 'cb') {
+    bucket.cb++;
+    bucket.cbOcc += occ;
+  } else if (kind === 'balance') {
+    bucket.balance++;
+    bucket.balanceOcc += occ;
+  } else {
+    bucket.other++;
+    bucket.otherOcc += occ;
+  }
+}
+
 /**
  * Dashboard payload from alerts tab.
  * Columns: A..N (Reason Category M, Rejection Type N)
@@ -101,9 +125,12 @@ function getDashboardData(range) {
     range: R,
     scorecards: {
       total: 0, totalTokens: 0, totalOcc: 0,
-      cb: 0, cbTokens: 0, cbOcc: 0, active: 0
+      cb: 0, cbTokens: 0, cbOcc: 0,
+      balance: 0, balanceTokens: 0, balanceOcc: 0,
+      other: 0, otherTokens: 0, otherOcc: 0,
+      active: 0
     },
-    deltas: { total: 0, cb: 0, active: 0 },
+    deltas: { total: 0, cb: 0, balance: 0, other: 0, active: 0 },
     byTypePersisted: {},
     persistedTotal: 0,
     persistedTokenList: [],
@@ -122,9 +149,17 @@ function getDashboardData(range) {
   var inRange = function (key) { return key >= R.startKey && key <= R.endKey; };
   var inPrev = function (key) { return key >= R.prevStartKey && key <= R.prevEndKey; };
 
-  var agg = { total: 0, totalOcc: 0, cb: 0, cbOcc: 0, active: 0 };
-  var prevAgg = { total: 0, cb: 0, active: 0 };
+  var agg = {
+    total: 0, totalOcc: 0,
+    cb: 0, cbOcc: 0,
+    balance: 0, balanceOcc: 0,
+    other: 0, otherOcc: 0,
+    active: 0
+  };
+  var prevAgg = { total: 0, cb: 0, balance: 0, other: 0, active: 0 };
   var cbTokenSet = {};
+  var balanceTokenSet = {};
+  var otherTokenSet = {};
   var totalTokenSet = {};
   var byTypePersisted = {};
   var persistedTotal = 0;
@@ -133,7 +168,7 @@ function getDashboardData(range) {
   var NUM_BUCKETS = 48;
   var timeBuckets = [];
   for (var b = 0; b < NUM_BUCKETS; b++) {
-    timeBuckets.push({ cb: 0, other: 0, cbOcc: 0, otherOcc: 0 });
+    timeBuckets.push(emptyTrendBucket_());
   }
   var dateBuckets = {};
   var highOcc = {};
@@ -143,20 +178,31 @@ function getDashboardData(range) {
     var token = row[0];
     var exchange = row[1];
     var account = row[2];
+    var channel = row[4];
+    var firstTime = row[5];
+    var latestTime = row[6];
     var durationM = Number(row[7]) || 0;
     var status = row[8];
     var sessDate = row[9];
     var occ = Number(row[10]) || 1;
     var reason = row[11];
+    // Live re-classify so Dashboard.gs keyword updates apply without rebuilding alerts
     var rejType = row[13] || 'Uncategorized';
+    if (typeof classifyReason_ === 'function') {
+      var cls = classifyReason_(reason, '', channel);
+      if (cls && cls.rejectionType) rejType = cls.rejectionType;
+    }
     if (!sessDate) return;
 
     var dObj = new Date(sessDate);
     var dKey = Utilities.formatDate(dObj, tz, 'yyyy-MM-dd');
+    var kind = dashBucket_(rejType);
 
     if (inPrev(dKey)) {
       prevAgg.total++;
-      if (rejType === 'CB Rejection') prevAgg.cb++;
+      if (kind === 'cb') prevAgg.cb++;
+      else if (kind === 'balance') prevAgg.balance++;
+      else prevAgg.other++;
       if (status === 'Live') prevAgg.active++;
     }
 
@@ -165,11 +211,21 @@ function getDashboardData(range) {
     agg.total++;
     agg.totalOcc += occ;
     if (token) totalTokenSet[token] = true;
-    if (rejType === 'CB Rejection') {
+
+    if (kind === 'cb') {
       agg.cb++;
       agg.cbOcc += occ;
       if (token) cbTokenSet[token] = true;
+    } else if (kind === 'balance') {
+      agg.balance++;
+      agg.balanceOcc += occ;
+      if (token) balanceTokenSet[token] = true;
+    } else {
+      agg.other++;
+      agg.otherOcc += occ;
+      if (token) otherTokenSet[token] = true;
     }
+
     if (status === 'Live') agg.active++;
 
     if (durationM >= persistMin) {
@@ -184,28 +240,21 @@ function getDashboardData(range) {
       }
     }
 
+    // Intraday buckets must use First/Latest alert time — Session Date is date-only (00:00)
     if (R.singleDay) {
-      var hr = Number(Utilities.formatDate(dObj, tz, 'H'));
-      var mn = Number(Utilities.formatDate(dObj, tz, 'm'));
-      var bIdx = hr * 2 + (mn >= 30 ? 1 : 0);
-      if (bIdx >= 0 && bIdx < NUM_BUCKETS) {
-        if (rejType === 'CB Rejection') {
-          timeBuckets[bIdx].cb++;
-          timeBuckets[bIdx].cbOcc += occ;
-        } else {
-          timeBuckets[bIdx].other++;
-          timeBuckets[bIdx].otherOcc += occ;
+      var tSrc = latestTime || firstTime;
+      var tObj = tSrc ? new Date(tSrc) : null;
+      if (tObj && !isNaN(tObj.getTime())) {
+        var hr = Number(Utilities.formatDate(tObj, tz, 'H'));
+        var mn = Number(Utilities.formatDate(tObj, tz, 'm'));
+        var bIdx = hr * 2 + (mn >= 30 ? 1 : 0);
+        if (bIdx >= 0 && bIdx < NUM_BUCKETS) {
+          bumpTrend_(timeBuckets[bIdx], kind, occ);
         }
       }
     } else {
-      if (!dateBuckets[dKey]) dateBuckets[dKey] = { cb: 0, other: 0, cbOcc: 0, otherOcc: 0 };
-      if (rejType === 'CB Rejection') {
-        dateBuckets[dKey].cb++;
-        dateBuckets[dKey].cbOcc += occ;
-      } else {
-        dateBuckets[dKey].other++;
-        dateBuckets[dKey].otherOcc += occ;
-      }
+      if (!dateBuckets[dKey]) dateBuckets[dKey] = emptyTrendBucket_();
+      bumpTrend_(dateBuckets[dKey], kind, occ);
     }
 
     if (occ > threshold) {
@@ -214,18 +263,17 @@ function getDashboardData(range) {
       if (status === 'Live') highOcc[token].status = 'Live';
     }
 
-    if (rejType === 'CB Rejection') {
-      rejectionTable.push({
-        token: token,
-        exchange: exchange,
-        account: account,
-        reason: reason,
-        type: rejType,
-        duration: durationM,
-        occurrence: occ,
-        status: status
-      });
-    }
+    rejectionTable.push({
+      token: token,
+      exchange: exchange,
+      account: account,
+      reason: reason,
+      type: rejType,
+      bucket: kind,
+      duration: durationM,
+      occurrence: occ,
+      status: status
+    });
   });
 
   var persistedTokenList = Object.keys(persistedTokens).map(function (t) {
@@ -259,8 +307,10 @@ function getDashboardData(range) {
       return {
         label: label,
         cb: bucket.cb,
+        balance: bucket.balance,
         other: bucket.other,
         cbOcc: bucket.cbOcc,
+        balanceOcc: bucket.balanceOcc,
         otherOcc: bucket.otherOcc
       };
     });
@@ -271,8 +321,10 @@ function getDashboardData(range) {
       return {
         label: k.slice(5),
         cb: dateBuckets[k].cb,
+        balance: dateBuckets[k].balance,
         other: dateBuckets[k].other,
         cbOcc: dateBuckets[k].cbOcc,
+        balanceOcc: dateBuckets[k].balanceOcc,
         otherOcc: dateBuckets[k].otherOcc
       };
     });
@@ -290,11 +342,19 @@ function getDashboardData(range) {
       cb: agg.cb,
       cbTokens: Object.keys(cbTokenSet).length,
       cbOcc: agg.cbOcc,
+      balance: agg.balance,
+      balanceTokens: Object.keys(balanceTokenSet).length,
+      balanceOcc: agg.balanceOcc,
+      other: agg.other,
+      otherTokens: Object.keys(otherTokenSet).length,
+      otherOcc: agg.otherOcc,
       active: agg.active
     },
     deltas: {
       total: agg.total - prevAgg.total,
       cb: agg.cb - prevAgg.cb,
+      balance: agg.balance - prevAgg.balance,
+      other: agg.other - prevAgg.other,
       active: agg.active - prevAgg.active
     },
     byTypePersisted: byTypePersisted,

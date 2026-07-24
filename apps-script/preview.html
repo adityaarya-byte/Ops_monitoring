@@ -12,6 +12,7 @@
       --accent: #2F6BFF;
       --accent-soft: rgba(47, 107, 255, 0.12);
       --cb: #E85D4C;
+      --balance: #D97706;
       --other: #3D8B7A;
       --ok: #1F8A5B;
       --warn: #D97706;
@@ -281,11 +282,23 @@
     .panel-h {
       display: flex;
       justify-content: space-between;
-      align-items: baseline;
+      align-items: center;
       gap: 8px;
       padding: 12px 14px;
       border-bottom: 1px solid var(--border);
       background: linear-gradient(180deg, var(--surface) 0%, var(--surface-2) 100%);
+      flex-wrap: wrap;
+    }
+    .panel-h.stack {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 10px;
+    }
+    .panel-h-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 8px;
     }
     .panel-h h2 {
       margin: 0;
@@ -296,6 +309,13 @@
       font-size: 0.75rem;
       color: var(--muted);
       font-weight: 600;
+    }
+    .panel-h .seg {
+      align-self: flex-start;
+    }
+    .panel-h .seg button {
+      font-size: 0.78rem;
+      padding: 6px 10px;
     }
     .panel-b { padding: 10px 12px 14px; }
     .chart-wrap {
@@ -467,7 +487,7 @@
       <div class="panel">
         <div class="panel-h">
           <h2 id="trendTitle">Rejection Trend</h2>
-          <div class="sub">sessions vs occurrences</div>
+          <div class="sub" id="trendSub">occurrences by type</div>
         </div>
         <div class="panel-b">
           <div class="chart-wrap"><canvas id="trendChart"></canvas></div>
@@ -476,9 +496,16 @@
     </section>
 
     <section class="panel" style="margin-top:12px">
-      <div class="panel-h">
-        <h2>CB Rejections</h2>
-        <div class="sub" id="tableSub">0 rows</div>
+      <div class="panel-h stack">
+        <div class="panel-h-row">
+          <h2 id="tableTitle">Rejection Details</h2>
+          <div class="sub" id="tableSub">0 rows</div>
+        </div>
+        <div class="seg" id="tableSeg" role="tablist" aria-label="Rejection detail filter">
+          <button type="button" data-bucket="cb" class="active">CB Rejection</button>
+          <button type="button" data-bucket="balance">Balance Insufficient</button>
+          <button type="button" data-bucket="other">Others</button>
+        </div>
       </div>
       <div class="table-wrap">
         <table>
@@ -524,7 +551,14 @@
       'Order size below minimum'
     ];
 
+    var BUCKET_LABELS = {
+      cb: 'CB Rejection',
+      balance: 'Balance Insufficient',
+      other: 'Others'
+    };
     var rangeType = 'today';
+    var tableBucket = 'cb';
+    var lastPayload = null;
     var typeChart = null;
     var trendChart = null;
     var seed = 1;
@@ -651,8 +685,10 @@
           trendBuckets.push({
             label: pad2(h) + ':' + m,
             cb: Math.max(0, Math.round(rnd(0, 6) * hourFactor)),
+            balance: Math.max(0, Math.round(rnd(0, 4) * hourFactor)),
             other: Math.max(0, Math.round(rnd(0, 5) * hourFactor)),
             cbOcc: Math.max(0, Math.round(rnd(0, 40) * hourFactor)),
+            balanceOcc: Math.max(0, Math.round(rnd(0, 25) * hourFactor)),
             otherOcc: Math.max(0, Math.round(rnd(0, 30) * hourFactor))
           });
         }
@@ -664,8 +700,10 @@
           trendBuckets.push({
             label: pad2(day.getMonth() + 1) + '-' + pad2(day.getDate()),
             cb: rnd(2, 24),
+            balance: rnd(1, 14),
             other: rnd(1, 18),
             cbOcc: rnd(20, 220),
+            balanceOcc: rnd(10, 140),
             otherOcc: rnd(10, 160)
           });
         }
@@ -674,12 +712,18 @@
       var rejectionTable = [];
       var nRows = rnd(8, 28);
       for (var r = 0; r < nRows; r++) {
+        var rowType = pick(TYPES);
+        var bucket;
+        if (rowType === 'CB Rejection') bucket = 'cb';
+        else if (rowType === 'Balance Rejection') bucket = 'balance';
+        else bucket = 'other';
         rejectionTable.push({
           token: pick(tokenPool),
           exchange: pick(EXCHANGES),
           account: pick(ACCOUNTS),
           reason: pick(REASONS),
-          type: 'CB Rejection',
+          type: rowType,
+          bucket: bucket,
           duration: rnd(5, 180),
           occurrence: rnd(1, 250),
           status: chance(25) ? 'Live' : 'Ended'
@@ -833,56 +877,51 @@
       var labels = buckets.map(function (b) { return b.label; });
       var mode = d.trendMode || 'time';
       $('trendTitle').textContent = mode === 'date' ? 'Daily Trend' : 'Intraday Trend';
+      $('trendSub').textContent = 'CB · Balance Insufficient · Others (occurrences)';
 
       var text = chartTextColor();
       var grid = chartGridColor();
+      var cbData = buckets.map(function (b) { return b.cbOcc || 0; });
+      var balData = buckets.map(function (b) { return b.balanceOcc || 0; });
+      var otherData = buckets.map(function (b) { return b.otherOcc || 0; });
 
       var cfg = {
-        type: 'bar',
+        type: 'line',
         data: {
           labels: labels,
           datasets: [
             {
-              type: 'bar',
-              label: 'CB sessions',
-              data: buckets.map(function (b) { return b.cb || 0; }),
-              backgroundColor: 'rgba(232, 93, 76, 0.75)',
-              borderRadius: 3,
-              yAxisID: 'y',
-              order: 2
-            },
-            {
-              type: 'bar',
-              label: 'Other sessions',
-              data: buckets.map(function (b) { return b.other || 0; }),
-              backgroundColor: 'rgba(61, 139, 122, 0.7)',
-              borderRadius: 3,
-              yAxisID: 'y',
-              order: 2
-            },
-            {
-              type: 'line',
-              label: 'CB occurrences',
-              data: buckets.map(function (b) { return b.cbOcc || 0; }),
+              label: 'CB Rejection',
+              data: cbData,
               borderColor: '#E85D4C',
-              backgroundColor: '#E85D4C',
-              tension: 0.25,
+              backgroundColor: 'rgba(232, 93, 76, 0.18)',
+              fill: true,
+              tension: 0.3,
               pointRadius: 0,
-              borderWidth: 2,
-              yAxisID: 'y1',
-              order: 1
+              pointHoverRadius: 4,
+              borderWidth: 2.5
             },
             {
-              type: 'line',
-              label: 'Other occurrences',
-              data: buckets.map(function (b) { return b.otherOcc || 0; }),
-              borderColor: '#3D8B7A',
-              backgroundColor: '#3D8B7A',
-              tension: 0.25,
+              label: 'Balance Insufficient',
+              data: balData,
+              borderColor: '#D97706',
+              backgroundColor: 'rgba(217, 119, 6, 0.14)',
+              fill: true,
+              tension: 0.3,
               pointRadius: 0,
-              borderWidth: 2,
-              yAxisID: 'y1',
-              order: 1
+              pointHoverRadius: 4,
+              borderWidth: 2.5
+            },
+            {
+              label: 'Others',
+              data: otherData,
+              borderColor: '#2F6BFF',
+              backgroundColor: 'rgba(47, 107, 255, 0.12)',
+              fill: true,
+              tension: 0.3,
+              pointRadius: 0,
+              pointHoverRadius: 4,
+              borderWidth: 2.5
             }
           ]
         },
@@ -902,22 +941,30 @@
               grid: { color: 'transparent' }
             },
             y: {
-              position: 'left',
-              title: { display: true, text: 'Sessions', color: text, font: { size: 11 } },
-              ticks: { color: text, precision: 0 },
-              grid: { color: grid }
-            },
-            y1: {
-              position: 'right',
+              beginAtZero: true,
               title: { display: true, text: 'Occurrences', color: text, font: { size: 11 } },
               ticks: { color: text, precision: 0 },
-              grid: { drawOnChartArea: false }
+              grid: { color: grid }
             }
           },
           plugins: {
             legend: {
               position: 'bottom',
               labels: { color: text, boxWidth: 10, font: { size: 11 } }
+            },
+            tooltip: {
+              callbacks: {
+                afterBody: function (items) {
+                  if (!items || !items.length) return '';
+                  var i = items[0].dataIndex;
+                  var b = buckets[i] || {};
+                  return [
+                    'Sessions — CB: ' + (b.cb || 0) +
+                      ' · Balance: ' + (b.balance || 0) +
+                      ' · Others: ' + (b.other || 0)
+                  ];
+                }
+              }
             }
           }
         }
@@ -928,11 +975,24 @@
     }
 
     function renderTable(d) {
-      var rows = d.rejectionTable || [];
+      var all = (d && d.rejectionTable) ? d.rejectionTable : [];
+      var rows = all.filter(function (r) {
+        var bucket = r.bucket;
+        if (!bucket) {
+          if (r.type === 'CB Rejection') bucket = 'cb';
+          else if (r.type === 'Balance Rejection') bucket = 'balance';
+          else bucket = 'other';
+        }
+        return bucket === tableBucket;
+      });
+
+      var title = BUCKET_LABELS[tableBucket] || 'Rejection Details';
+      $('tableTitle').textContent = title;
       $('tableSub').textContent = rows.length + ' row' + (rows.length === 1 ? '' : 's');
+
       var body = $('rejBody');
       if (!rows.length) {
-        body.innerHTML = '<tr><td colspan="8" class="empty">No CB rejections in this range</td></tr>';
+        body.innerHTML = '<tr><td colspan="8" class="empty">No ' + esc(title.toLowerCase()) + ' in this range</td></tr>';
         return;
       }
       body.innerHTML = rows.map(function (r) {
@@ -951,6 +1011,7 @@
     }
 
     function render(d) {
+      lastPayload = d;
       $('updatedAt').textContent = 'Updated ' + (d.updatedAt || '—');
       $('rangeLabel').textContent = (d.range && d.range.label) ? d.range.label : rangeType;
 
@@ -1024,6 +1085,16 @@
     $('applyCustom').addEventListener('click', function () {
       rangeType = 'custom';
       load();
+    });
+
+    Array.prototype.forEach.call($('tableSeg').querySelectorAll('button'), function (btn) {
+      btn.addEventListener('click', function () {
+        Array.prototype.forEach.call($('tableSeg').querySelectorAll('button'), function (b) {
+          b.classList.toggle('active', b === btn);
+        });
+        tableBucket = btn.getAttribute('data-bucket') || 'cb';
+        if (lastPayload) renderTable(lastPayload);
+      });
     });
 
     initTheme();
