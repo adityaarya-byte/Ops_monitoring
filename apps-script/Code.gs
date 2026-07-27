@@ -603,14 +603,16 @@ const AlertFilters = {
     }
 
     if (AlertFilters.isActionRequired(ch)) {
-      if (/Could not \w+ order on\s+Coindcx/i.test(raw) || ex === 'coindcx') return false;
-      return true; // all other successfully parsed alerts (Binance / KC / Gateio / …)
+      // Do not keep Could not CREATE/CANCEL (Format D) — dropped at parse too
+      if (/Could not\s+\w+\s+order on/i.test(raw) || item.Format === 'JSON-Action') return false;
+      if (ex === 'coindcx') return false;
+      return true;
     }
 
     // Unknown / legacy channel names — keep insufficient + insta-style failures
     if (AlertFilters.isInsufficientReason(item)) return true;
     if (item.Format === 'Insta-InternalTp' || /Otc::Order did not succeeded/i.test(resp)) return true;
-    if (item.Format === 'INSTA-Key-Value' || item.Format === 'JSON-Action') return true;
+    if (item.Format === 'INSTA-Key-Value') return true;
     return false;
   }
 };
@@ -792,65 +794,10 @@ function parseSlackAlert(rawText, timestamp, channelName) {
       }
     }
 
-    // FORMAT D: Could not CREATE/CANCEL order on Binance|Gateio|Kucoin (skip Coindcx via filter)
-    // Token = "{instrument_id}_{external_instrument_name}" via instrument_id sheet lookup
-    if (/Could not \w+ order on/i.test(text)) {
-      const exchangeMatch = text.match(/Could not \w+ order on (\w+)/i);
-      const exchangeName = exchangeMatch ? exchangeMatch[1] : '';
-      if (/^coindcx$/i.test(exchangeName)) return null;
-
-      var orderObj = {};
-      const orderJsonMatch = text.match(/\{"version"[\s\S]*?\}/);
-      if (orderJsonMatch) { try { orderObj = JSON.parse(orderJsonMatch[0]); } catch (e) {} }
-
-      var instrumentId = orderObj.instrument_id;
-      if (instrumentId === undefined || instrumentId === null || instrumentId === '') {
-        const im = text.match(/"instrument_id"\s*:\s*(\d+)/i);
-        if (im) instrumentId = im[1];
-      }
-
-      const orderId = orderObj.client_order_id
-        ? String(orderObj.client_order_id)
-        : (orderObj.id ? String(orderObj.id) : '');
-
-      // Token: map instrument_id → "1343_BTCINR" (sheet instrument_id)
-      var token = '';
-      if (typeof InstrumentLookup !== 'undefined' && InstrumentLookup.resolveToken) {
-        token = InstrumentLookup.resolveToken(instrumentId);
-      } else if (instrumentId !== undefined && instrumentId !== null && instrumentId !== '') {
-        token = String(instrumentId);
-      }
-
-      var response = ParserUtils.extractInsufficientMessage(text);
-      // Prefer plain exchange messages; skip nested JSON like gate {\"label\":...}
-      const msgEx = text.match(
-        /"message"\s*:\s*"((?:binance|gate|kucoin|gateio)\s[^"{][^"]*)"/i
-      );
-      if (msgEx) response = ParserUtils.cleanField(msgEx[1]);
-      if (!response) {
-        const anyMsg = text.match(/"message"\s*:\s*"([^"{][^"]*)"/i);
-        if (anyMsg) response = ParserUtils.cleanField(anyMsg[1]);
-      }
-      var errCode = '';
-      if (/BALANCE_NOT_ENOUGH/i.test(text)) errCode = 'BALANCE_NOT_ENOUGH';
-      else if (/InsufficientFunds/i.test(text)) errCode = 'InsufficientFunds';
-      else if (/InvalidOrder/i.test(text)) errCode = 'InvalidOrder';
-      if (!response) response = 'Order action failed';
-
-      return [{
-        Timestamp: timestamp,
-        Exchange: exchangeName,
-        Token: token,
-        Side: orderObj.side ? String(orderObj.side).toLowerCase() : '',
-        Qty: orderObj.ordered_quantity !== undefined ? String(orderObj.ordered_quantity) : '',
-        Account: orderObj.exchange_account_id !== undefined ? String(orderObj.exchange_account_id) : '',
-        Response: response,
-        ErrorCode: errCode,
-        OrderId: orderId,
-        Format: 'JSON-Action',
-        Channel: channelName,
-        RawText: text
-      }];
+    // FORMAT D: Could not CREATE/CANCEL order on Binance|Gateio|Kucoin|Gate —
+    // intentionally NOT parsed (noisy nested exchange errors / account ids).
+    if (/Could not\s+\w+\s+order on/i.test(text)) {
+      return null;
     }
 
     // FORMAT E: Futures / instrument JSON — only if NOT the blocked "Production Futures Order rejected"
@@ -1533,6 +1480,71 @@ function resetAndRebuildAllowlistedAlerts() {
   fetchAndProcessPipeline();
   Logger.log('✅ Transform/alerts rebuilt with allowlisted reasons (lookback ' + CONFIG.LOOKBACK_DAYS + 'd).');
   Logger.log('👉 Next: run installTrigger() for every-' + CONFIG.TRIGGER_MINUTES + '-minute fetches.');
+}
+
+function isCreateCancelTransformRow_(obj) {
+  if (!obj) return false;
+  if (String(obj.Format || '') === 'JSON-Action') return true;
+  const hay = String(obj.RawText || '') + ' ' + String(obj.Response || '');
+  return /Could not\s+(CREATE|CANCEL)\s+order on/i.test(hay);
+}
+
+/**
+ * Remove Could not CREATE/CANCEL rows from transform sheets from startDate onward,
+ * then rebuild alerts (and dashboard). Use after deploying Format D drop.
+ *
+ * Example: purgeCreateCancelAlertsFromDate('2026-07-20')
+ * Shortcut: correctDataFromJuly20()
+ */
+function purgeCreateCancelAlertsFromDate(startDateKey) {
+  const startKey = startDateKey || '2026-07-20';
+  const startMs = new Date(startKey + 'T00:00:00').getTime();
+  if (isNaN(startMs)) {
+    Logger.log('❌ Invalid start date: ' + startDateKey);
+    return;
+  }
+
+  function purgeSheet(name) {
+    const sheet = SheetService.ensureSheetWithHeaders(name, TX_HEADERS);
+    const last = sheet.getLastRow();
+    if (last < 2) {
+      Logger.log('ℹ️ ' + name + ': empty');
+      return 0;
+    }
+    const values = sheet.getRange(2, 1, last - 1, TX_HEADERS.length).getValues();
+    const kept = [];
+    var dropped = 0;
+    values.forEach(function (row) {
+      const obj = {};
+      TX_HEADERS.forEach(function (h, i) { obj[h] = row[i]; });
+      const ts = obj.Timestamp ? new Date(obj.Timestamp).getTime() : NaN;
+      const inWindow = isNaN(ts) || ts >= startMs;
+      if (inWindow && isCreateCancelTransformRow_(obj)) {
+        dropped++;
+        return;
+      }
+      kept.push(row);
+    });
+    SheetService.clearSheetDataRows(name);
+    if (kept.length > 0) {
+      sheet.getRange(2, 1, kept.length, TX_HEADERS.length).setValues(kept);
+    }
+    Logger.log('🧹 ' + name + ': kept ' + kept.length + ', dropped ' + dropped + ' CREATE/CANCEL row(s) from ' + startKey);
+    return dropped;
+  }
+
+  const d1 = purgeSheet(CONFIG.SHEETS.TRANSFORM);
+  const d2 = purgeSheet(CONFIG.SHEETS.TRANSFORM_CB);
+  buildAlertsSheet();
+  Logger.log(
+    '✅ Purged CREATE/CANCEL from ' + startKey + ' onward (transform=' + d1 +
+    ', transform_cb=' + d2 + '). Alerts rebuilt. Future CREATE/CANCEL will not be parsed.'
+  );
+}
+
+/** Correct sheets from 20 Jul 2026: drop CREATE/CANCEL noise, rebuild alerts. */
+function correctDataFromJuly20() {
+  purgeCreateCancelAlertsFromDate('2026-07-20');
 }
 
 /** Diagnostic: shows what token key is set and its first 10 chars */

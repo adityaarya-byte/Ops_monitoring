@@ -357,13 +357,15 @@ const AlertFilters = {
     }
 
     if (AlertFilters.isActionRequired(ch)) {
-      if (/Could not \w+ order on\s+Coindcx/i.test(raw) || ex === 'coindcx') return false;
+      // Do not keep Could not CREATE/CANCEL (Format D) — dropped at parse too
+      if (/Could not\s+\w+\s+order on/i.test(raw) || item.Format === 'JSON-Action') return false;
+      if (ex === 'coindcx') return false;
       return true;
     }
 
     if (AlertFilters.isInsufficientReason(item)) return true;
     if (item.Format === 'Insta-InternalTp' || /Otc::Order did not succeeded/i.test(resp)) return true;
-    if (item.Format === 'INSTA-Key-Value' || item.Format === 'JSON-Action') return true;
+    if (item.Format === 'INSTA-Key-Value') return true;
     return false;
   }
 };
@@ -558,64 +560,10 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
       }
     }
 
-    // FORMAT D: Could not CREATE/CANCEL order on Binance|Gateio|Kucoin (skip Coindcx via filter)
-    // Token = "{instrument_id}_{external_instrument_name}" via helpers.resolveInstrumentToken
-    if (/Could not \w+ order on/i.test(text)) {
-      const exchangeMatch = text.match(/Could not \w+ order on (\w+)/i);
-      const exchangeName = exchangeMatch ? exchangeMatch[1] : '';
-      if (/^coindcx$/i.test(exchangeName)) return null;
-
-      var orderObj = {};
-      const orderJsonMatch = text.match(/\{"version"[\s\S]*?\}/);
-      if (orderJsonMatch) { try { orderObj = JSON.parse(orderJsonMatch[0]); } catch (e) { /* ignore */ } }
-
-      var instrumentId = orderObj.instrument_id;
-      if (instrumentId === undefined || instrumentId === null || instrumentId === '') {
-        const im = text.match(/"instrument_id"\s*:\s*(\d+)/i);
-        if (im) instrumentId = im[1];
-      }
-
-      const orderId = orderObj.client_order_id
-        ? String(orderObj.client_order_id)
-        : (orderObj.id ? String(orderObj.id) : '');
-
-      var token = '';
-      if (helpers && typeof helpers.resolveInstrumentToken === 'function') {
-        token = helpers.resolveInstrumentToken(instrumentId) || '';
-      } else if (instrumentId !== undefined && instrumentId !== null && instrumentId !== '') {
-        token = String(instrumentId);
-      }
-
-      var response = ParserUtils.extractInsufficientMessage(text);
-      // Prefer plain exchange messages; skip nested JSON like gate {\"label\":...}
-      const msgEx = text.match(
-        /"message"\s*:\s*"((?:binance|gate|kucoin|gateio)\s[^"{][^"]*)"/i
-      );
-      if (msgEx) response = ParserUtils.cleanField(msgEx[1]);
-      if (!response) {
-        const anyMsg = text.match(/"message"\s*:\s*"([^"{][^"]*)"/i);
-        if (anyMsg) response = ParserUtils.cleanField(anyMsg[1]);
-      }
-      var errCode = '';
-      if (/BALANCE_NOT_ENOUGH/i.test(text)) errCode = 'BALANCE_NOT_ENOUGH';
-      else if (/InsufficientFunds/i.test(text)) errCode = 'InsufficientFunds';
-      else if (/InvalidOrder/i.test(text)) errCode = 'InvalidOrder';
-      if (!response) response = 'Order action failed';
-
-      return [{
-        Timestamp: timestamp,
-        Exchange: exchangeName,
-        Token: token,
-        Side: orderObj.side ? String(orderObj.side).toLowerCase() : '',
-        Qty: orderObj.ordered_quantity !== undefined ? String(orderObj.ordered_quantity) : '',
-        Account: orderObj.exchange_account_id !== undefined ? String(orderObj.exchange_account_id) : '',
-        Response: response,
-        ErrorCode: errCode,
-        OrderId: orderId,
-        Format: 'JSON-Action',
-        Channel: channelName,
-        RawText: text
-      }];
+    // FORMAT D: Could not CREATE/CANCEL order on Binance|Gateio|Kucoin|Gate —
+    // intentionally NOT parsed (noisy nested exchange errors / account ids).
+    if (/Could not\s+\w+\s+order on/i.test(text)) {
+      return null;
     }
 
     // FORMAT E: Futures / instrument JSON — only if NOT the blocked "Production Futures Order rejected"

@@ -130,38 +130,22 @@ run('parses Production Binance MANTAUSDT inline rejection', function () {
   assert.ok(AlertFilters.shouldKeepAlert(r));
 });
 
-run('parses Gateio Could not CREATE with InsufficientFunds → Token=instrument map', function () {
+run('Format D Could not CREATE/CANCEL is not parsed', function () {
   const text =
     'Mercury-Production Could not CREATE order on Gateio - ' +
-    '{"version":1,"is_deleted":false,"created_at":1781337153401,"updated_at":1781337153401,' +
-    '"created_by":0,"updated_by":0,"trace_id":"a151b82a2ad446d2acd51c2d224df800","id":123324974,' +
-    '"client_id":0,"client_order_id":387518130,"latest_event_id":2,' +
-    '"client_order_version_type":"CREATE","client_order_version_status":"IN_PROGRESS",' +
-    '"instrument_id":3904,"conversion_instrument_id":0,"order_type":"LIMIT","side":"BUY",' +
-    '"ordered_quantity":800,"ordered_price":0.1519,"converted_ordered_price":null,' +
-    '"internal_metadata":null,"exchange_account_id":0,"exchange_order_id":"",' +
-    '"exchange_order_status":"OPEN","executed_quantity":0,"time_in_force":"TIME_IN_FORCE_GTC",' +
-    '"valid_till":1781337153345,"client_user_id":18764269}. ' +
+    '{"version":1,"trace_id":"a151b82a2ad446d2acd51c2d224df800","instrument_id":3904,' +
+    '"side":"BUY","ordered_quantity":800,"exchange_account_id":27}. ' +
     '{ description : rpc error: code = Unknown desc = {"name":"InsufficientFunds",' +
     '"message":"gate {\\"label\\":\\"BALANCE_NOT_ENOUGH\\",\\"message\\":\\"Not enough balance\\"}"} }';
-
-  const helpers = {
-    resolveInstrumentToken: function (id) {
-      return String(id) === '3904' ? '3904_SOMEINR' : String(id || '');
-    }
-  };
-  const r = parseSlackAlert(text, TS, ACTION_MERCURY, helpers)[0];
-  assert.strictEqual(r.Exchange, 'Gateio');
-  assert.strictEqual(r.Format, 'JSON-Action');
-  assert.strictEqual(r.Token, '3904_SOMEINR');
-  assert.strictEqual(r.Side, 'buy');
-  assert.strictEqual(r.Qty, '800');
-  assert.strictEqual(String(r.OrderId), '387518130');
-  assert.ok(
-    /not enough balance|insufficient/i.test(r.Response),
-    'expected insufficient reason, got: ' + r.Response
+  assert.strictEqual(parseSlackAlert(text, TS, ACTION_MERCURY), null);
+  assert.strictEqual(
+    parseSlackAlert('Could not CANCEL order on Binance - {"version":1,"side":"SELL"}', TS, ACTION_MERCURY),
+    null
   );
-  assert.ok(AlertFilters.shouldKeepAlert(r));
+  assert.strictEqual(
+    parseSlackAlert('Could not CREATE order on Kucoin - {"version":1,"side":"BUY"}', TS, ACTION_MERCURY),
+    null
+  );
 });
 
 run('INSTA ORDER_REJECTED with Error: 500000 — uses ruby :reason', function () {
@@ -215,64 +199,6 @@ run('Format C: Kucoin RAIN_USDT strips KC-S- prefix via tokenFromPrefixedInstrum
   const tsKey = formatDateLocal(TS);
   assert.strictEqual(r.OrderId, 'RAIN_USDT_Kucoin_' + tsKey + '_C');
   assert.ok(AlertFilters.shouldKeepAlert(r));
-});
-
-run('Format D: Binance CREATE uses instrument_id token + insufficient message', function () {
-  const text =
-    'Could not CREATE order on Binance - ' +
-    '{"version":1,"trace_id":"trace-binance-abc","id":99,"client_order_id":"co-1",' +
-    '"instrument_id":12,"side":"SELL","ordered_quantity":5,"exchange_account_id":3}. ' +
-    '{"message":"binance Account has insufficient balance for requested action."}';
-
-  const helpers = {
-    resolveInstrumentToken: function (id) {
-      return String(id) === '12' ? '12_BTCINR' : String(id || '');
-    }
-  };
-  const r = parseSlackAlert(text, TS, ACTION_MERCURY, helpers)[0];
-  assert.strictEqual(r.Format, 'JSON-Action');
-  assert.strictEqual(r.Exchange, 'Binance');
-  assert.strictEqual(r.Token, '12_BTCINR');
-  assert.ok(r.Response.toLowerCase().indexOf('insufficient balance') !== -1);
-  assert.ok(AlertFilters.shouldKeepAlert(r));
-});
-
-run('Format D: Binance InvalidOrder PERCENT_PRICE maps instrument_id', function () {
-  const text =
-    'Mercury-Production Could not CREATE order on Binance - ' +
-    '{"version":1,"is_deleted":false,"created_at":1784804866570,"updated_at":1784804866570,' +
-    '"created_by":0,"updated_by":0,"trace_id":"6f67ee23d21a4fd297a75703e1a39925","id":825756489,' +
-    '"client_id":0,"client_order_id":1120689853,"latest_event_id":2,' +
-    '"client_order_version_type":"CREATE","client_order_version_status":"IN_PROGRESS",' +
-    '"instrument_id":1343,"conversion_instrument_id":0,"order_type":"LIMIT","side":"SELL",' +
-    '"ordered_quantity":280,"ordered_price":0.61,"converted_ordered_price":null,' +
-    '"internal_metadata":null,"exchange_account_id":0,"exchange_order_id":"",' +
-    '"exchange_order_status":"OPEN","executed_quantity":0,"time_in_force":"TIME_IN_FORCE_GTC",' +
-    '"valid_till":1784804866526,"client_user_id":10070925}. ' +
-    '{ description : rpc error: code = Unknown desc = {"name":"InvalidOrder",' +
-    '"message":"binance Filter failure: PERCENT_PRICE_BY_SIDE"} }';
-
-  const helpers = {
-    resolveInstrumentToken: function (id) {
-      return String(id) === '1343' ? '1343_XYZINR' : String(id || '');
-    }
-  };
-  const r = parseSlackAlert(text, TS, ACTION_MERCURY, helpers)[0];
-  assert.strictEqual(r.Format, 'JSON-Action');
-  assert.strictEqual(r.Exchange, 'Binance');
-  assert.strictEqual(r.Token, '1343_XYZINR');
-  assert.strictEqual(r.ErrorCode, 'InvalidOrder');
-  assert.ok(/PERCENT_PRICE_BY_SIDE/i.test(r.Response), 'got: ' + r.Response);
-  assert.ok(AlertFilters.shouldKeepAlert(r));
-});
-
-run('Format D: without helper falls back to bare instrument_id', function () {
-  const text =
-    'Could not CREATE order on Binance - ' +
-    '{"version":1,"trace_id":"t1","client_order_id":"c1","instrument_id":1212,"side":"BUY","ordered_quantity":1}. ' +
-    '{"message":"binance Filter failure: PERCENT_PRICE_BY_SIDE"}';
-  const r = parseSlackAlert(text, TS, ACTION_MERCURY)[0];
-  assert.strictEqual(r.Token, '1212');
 });
 
 run('Format D: Coindcx CREATE returns null', function () {
@@ -400,7 +326,7 @@ run('allowlist: per-channel keep rules', function () {
       Response: 'Order action failed',
       RawText: 'Could not CREATE order on Binance'
     }),
-    true
+    false
   );
   assert.strictEqual(
     AlertFilters.shouldKeepAlert({
@@ -417,9 +343,9 @@ run('allowlist: per-channel keep rules', function () {
       Channel: ACTION_MERCURY,
       Response: 'Order action failed',
       ErrorCode: '',
-      RawText: 'Could not CREATE order'
+      RawText: 'Could not CREATE order on Kucoin'
     }),
-    true // non-Coindcx action-required keeps all parsed
+    false
   );
   assert.strictEqual(
     AlertFilters.shouldKeepAlert({
