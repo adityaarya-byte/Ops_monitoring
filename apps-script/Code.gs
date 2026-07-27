@@ -893,12 +893,14 @@ function parseSlackAlert(rawText, timestamp, channelName) {
           OrderId: dedupKey, Format: 'CB-Digest', Channel: channelName, RawText: line
         });
       });
-      // Same digest can appear 2–3× in Slack text/attachment/blocks — keep unique OrderId
-      const seenOid = {};
+      // Same digest can appear 2–3× in Slack text/attachment/blocks —
+      // collapse only identical OrderId + timestamp (same event)
+      const seenEvent = {};
       const uniqueRows = [];
       expandedRows.forEach(function (r) {
-        if (seenOid[r.OrderId]) return;
-        seenOid[r.OrderId] = true;
+        const key = transformDedupeKey_(r);
+        if (key && seenEvent[key]) return;
+        if (key) seenEvent[key] = true;
         uniqueRows.push(r);
       });
       if (uniqueRows.length > 0) return uniqueRows;
@@ -1011,23 +1013,47 @@ function extractSlackMessageText(msg) {
   return ParserUtils.dedupeAlertLines(uniq.join('\n'));
 }
 
-/** Existing OrderId set for a transform sheet (skip re-appends). */
-function loadExistingOrderIds_(sheetName) {
+/**
+ * Dedup key = OrderId + alert time.
+ * Same OrderId at a later time is a new rejection and must be kept.
+ * Same OrderId at the same time is a Slack duplicate (text/attachment/blocks).
+ */
+function transformDedupeKey_(item) {
+  if (!item) return '';
+  var oid = item.OrderId != null ? String(item.OrderId) : '';
+  var tsMs = '';
+  if (item.Timestamp) {
+    var d = new Date(item.Timestamp);
+    if (!isNaN(d.getTime())) tsMs = String(d.getTime());
+  }
+  if (oid || tsMs) return oid + '|' + tsMs;
+  return [
+    item.Token || '',
+    item.Channel || '',
+    item.Response || '',
+    item.Side || ''
+  ].join('|');
+}
+
+/** Existing OrderId+time keys for a transform sheet (skip exact re-appends). */
+function loadExistingTransformKeys_(sheetName) {
   const set = {};
   try {
     const data = SheetService.readAsObjects(sheetName, TX_HEADERS);
     data.rows.forEach(function (r) {
-      if (r && r.OrderId) set[String(r.OrderId)] = true;
+      const key = transformDedupeKey_(r);
+      if (key) set[key] = true;
     });
   } catch (e) {
-    Logger.log('⚠️ loadExistingOrderIds_ ' + sheetName + ': ' + e.message);
+    Logger.log('⚠️ loadExistingTransformKeys_ ' + sheetName + ': ' + e.message);
   }
   return set;
 }
 
 /**
- * One-shot cleanup: remove duplicate OrderId rows from transform / transform_cb
- * (keeps first occurrence). Then run buildAlertsSheet().
+ * One-shot cleanup: remove duplicate (OrderId + Timestamp) rows from
+ * transform / transform_cb (keeps first). Same OrderId at different times kept.
+ * Then run buildAlertsSheet().
  */
 function dedupeTransformSheets() {
   [CONFIG.SHEETS.TRANSFORM, CONFIG.SHEETS.TRANSFORM_CB].forEach(function (name) {
@@ -1035,24 +1061,39 @@ function dedupeTransformSheets() {
     const last = sheet.getLastRow();
     if (last < 2) return;
     const values = sheet.getRange(2, 1, last - 1, TX_HEADERS.length).getValues();
+    const tsIdx = TX_HEADERS.indexOf('Timestamp');
     const orderIdIdx = TX_HEADERS.indexOf('OrderId');
+    const tokenIdx = TX_HEADERS.indexOf('Token');
+    const channelIdx = TX_HEADERS.indexOf('Channel');
+    const responseIdx = TX_HEADERS.indexOf('Response');
+    const sideIdx = TX_HEADERS.indexOf('Side');
     const seen = {};
     const kept = [];
     var dropped = 0;
     values.forEach(function (row) {
-      const oid = String(row[orderIdIdx] || '');
-      if (oid && seen[oid]) {
+      const key = transformDedupeKey_({
+        Timestamp: row[tsIdx],
+        OrderId: row[orderIdIdx],
+        Token: row[tokenIdx],
+        Channel: row[channelIdx],
+        Response: row[responseIdx],
+        Side: row[sideIdx]
+      });
+      if (key && seen[key]) {
         dropped++;
         return;
       }
-      if (oid) seen[oid] = true;
+      if (key) seen[key] = true;
       kept.push(row);
     });
     SheetService.clearSheetDataRows(name);
     if (kept.length > 0) {
       sheet.getRange(2, 1, kept.length, TX_HEADERS.length).setValues(kept);
     }
-    Logger.log('🧹 ' + name + ': kept ' + kept.length + ', dropped ' + dropped + ' duplicate OrderId row(s)');
+    Logger.log(
+      '🧹 ' + name + ': kept ' + kept.length +
+      ', dropped ' + dropped + ' duplicate OrderId+time row(s)'
+    );
   });
   buildAlertsSheet();
 }
@@ -1180,8 +1221,8 @@ function transformRawMessages() {
   const mainToAppend = [];
   const cbToAppend = [];
   const rawUpdates = [];
-  const existingMainIds = loadExistingOrderIds_(CONFIG.SHEETS.TRANSFORM);
-  const existingCbIds = loadExistingOrderIds_(CONFIG.SHEETS.TRANSFORM_CB);
+  const existingMainKeys = loadExistingTransformKeys_(CONFIG.SHEETS.TRANSFORM);
+  const existingCbKeys = loadExistingTransformKeys_(CONFIG.SHEETS.TRANSFORM_CB);
 
   var stats = { parsed: 0, kept: 0, filtered: 0, unparsed: 0, dupSkipped: 0 };
 
@@ -1210,21 +1251,21 @@ function transformRawMessages() {
           );
           return;
         }
-        const oid = item.OrderId ? String(item.OrderId) : '';
         const isCb = AlertFilters.isCbChannel(item.Channel) || item.Format === 'CB-Digest';
-        if (oid) {
+        const dkey = transformDedupeKey_(item);
+        if (dkey) {
           if (isCb) {
-            if (existingCbIds[oid]) {
+            if (existingCbKeys[dkey]) {
               stats.dupSkipped++;
               return;
             }
-            existingCbIds[oid] = true;
+            existingCbKeys[dkey] = true;
           } else {
-            if (existingMainIds[oid]) {
+            if (existingMainKeys[dkey]) {
               stats.dupSkipped++;
               return;
             }
-            existingMainIds[oid] = true;
+            existingMainKeys[dkey] = true;
           }
         }
         stats.kept++;

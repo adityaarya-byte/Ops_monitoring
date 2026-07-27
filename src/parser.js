@@ -666,12 +666,19 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
           RawText: line
         });
       });
-      // Same digest can appear 2–3× in Slack text/attachment/blocks — keep unique OrderId
-      const seenOid = {};
+      // Same digest can appear 2–3× in Slack text/attachment/blocks —
+      // collapse only identical OrderId + timestamp (same event)
+      const seenEvent = {};
       const uniqueRows = [];
       expandedRows.forEach(function (r) {
-        if (seenOid[r.OrderId]) return;
-        seenOid[r.OrderId] = true;
+        var tsMs = '';
+        if (r.Timestamp) {
+          var d = new Date(r.Timestamp);
+          if (!isNaN(d.getTime())) tsMs = String(d.getTime());
+        }
+        const key = String(r.OrderId || '') + '|' + tsMs;
+        if (key !== '|' && seenEvent[key]) return;
+        if (key !== '|') seenEvent[key] = true;
         uniqueRows.push(r);
       });
       if (uniqueRows.length > 0) return uniqueRows;

@@ -289,7 +289,7 @@ run('Futures Order rejected on alerts-exchange-funds → null', function () {
   assert.strictEqual(parseSlackAlert(text, TS, EXCHANGE_FUNDS), null);
 });
 
-run('CB digest: duplicated Slack text/attachment lines collapse to unique OrderIds', function () {
+run('CB digest: duplicated Slack lines collapse by OrderId+time; different times kept', function () {
   const bulletA =
     '• LF buy | The market is too volatile right now. Please try again later | user 682f395a-459e-4ebc-bfd9-920ed1b1cd56 | 2026-07-26 15:39:33';
   const bulletB =
@@ -308,7 +308,8 @@ run('CB digest: duplicated Slack text/attachment lines collapse to unique OrderI
   assert.strictEqual(rows.length, 2, 'expected 2 LF rows, got ' + (rows && rows.length));
   assert.strictEqual(rows[0].Token, 'LF');
   assert.strictEqual(rows[1].Token, 'LF');
-  assert.notStrictEqual(rows[0].OrderId, rows[1].OrderId);
+  // Different alert times → both kept even if user/order context overlaps
+  assert.notStrictEqual(new Date(rows[0].Timestamp).getTime(), new Date(rows[1].Timestamp).getTime());
 });
 
 run('CB digest keeps volatile + something went wrong + insufficient funds', function () {
