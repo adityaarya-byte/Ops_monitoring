@@ -282,6 +282,21 @@ const AlertFilters = {
     return ParserUtils.cleanField(reason);
   },
 
+  /**
+   * Labels for a cb-order-rejection digest line.
+   * Insufficient funds must NOT be named CB (Exchange/Format) — treat as Insta/Balance.
+   */
+  cbDigestRowLabels: function (reason) {
+    const response = AlertFilters.normalizeCbDigestReason(reason);
+    if (AlertFilters.isCbInsufficientFundsReason(reason)) {
+      return { Exchange: 'Insta', Format: 'Insta-Digest', Response: response };
+    }
+    if (AlertFilters.isSomethingWentWrongReason(reason)) {
+      return { Exchange: 'Insta', Format: 'Insta-Digest', Response: response };
+    }
+    return { Exchange: 'CB', Format: 'CB-Digest', Response: response };
+  },
+
   isInsufficientReason: function (item) {
     const hay = [
       item && item.Response,
@@ -651,17 +666,18 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
         if (isNaN(alertTs.getTime())) return;
         const tsKey = formatDate(alertTs);
         const dedupKey = token + '_' + userId.substring(0, 8) + '_' + tsKey + '_F';
+        const labels = AlertFilters.cbDigestRowLabels(reason);
         expandedRows.push({
           Timestamp: alertTs,
-          Exchange: 'CB',
+          Exchange: labels.Exchange,
           Token: token,
           Side: side,
           Qty: '',
           Account: userId,
-          Response: AlertFilters.normalizeCbDigestReason(reason),
+          Response: labels.Response,
           ErrorCode: '',
           OrderId: dedupKey,
-          Format: 'CB-Digest',
+          Format: labels.Format,
           Channel: channelName,
           RawText: line
         });

@@ -516,6 +516,22 @@ const AlertFilters = {
     return ParserUtils.cleanField(reason);
   },
 
+  /**
+   * Labels for a cb-order-rejection digest line.
+   * Insufficient funds must NOT be named CB (Exchange/Format) — treat as Insta/Balance.
+   */
+  cbDigestRowLabels: function (reason) {
+    const response = AlertFilters.normalizeCbDigestReason(reason);
+    if (AlertFilters.isCbInsufficientFundsReason(reason)) {
+      return { Exchange: 'Insta', Format: 'Insta-Digest', Response: response };
+    }
+    if (AlertFilters.isSomethingWentWrongReason(reason)) {
+      return { Exchange: 'Insta', Format: 'Insta-Digest', Response: response };
+    }
+    // Market volatility only → CB
+    return { Exchange: 'CB', Format: 'CB-Digest', Response: response };
+  },
+
   isInsufficientReason: function (item) {
     const hay = [item.Response, item.ErrorCode, item.RawText, item.reason]
       .join(' ')
@@ -885,12 +901,20 @@ function parseSlackAlert(rawText, timestamp, channelName) {
         if (isNaN(alertTs.getTime())) return;
         const tsKey = Utilities.formatDate(alertTs, Session.getScriptTimeZone(), 'yyyyMMddHHmmss');
         const dedupKey = token + '_' + userId.substring(0, 8) + '_' + tsKey + '_F';
+        const labels = AlertFilters.cbDigestRowLabels(reason);
         expandedRows.push({
-          Timestamp: alertTs, Exchange: 'CB', Token: token, Side: side,
-          Qty: '', Account: userId,
-          Response: AlertFilters.normalizeCbDigestReason(reason),
+          Timestamp: alertTs,
+          Exchange: labels.Exchange,
+          Token: token,
+          Side: side,
+          Qty: '',
+          Account: userId,
+          Response: labels.Response,
           ErrorCode: '',
-          OrderId: dedupKey, Format: 'CB-Digest', Channel: channelName, RawText: line
+          OrderId: dedupKey,
+          Format: labels.Format,
+          Channel: channelName,
+          RawText: line
         });
       });
       // Same digest can appear 2–3× in Slack text/attachment/blocks —
@@ -1251,7 +1275,11 @@ function transformRawMessages() {
           );
           return;
         }
-        const isCb = AlertFilters.isCbChannel(item.Channel) || item.Format === 'CB-Digest';
+        // Only true CB (volatile) digests → transform_cb; IF/SWW from CB channel → transform
+        const isCb =
+          item.Format === 'CB-Digest' ||
+          (AlertFilters.isCbChannel(item.Channel) &&
+            String(item.Exchange || '').toUpperCase() === 'CB');
         const dkey = transformDedupeKey_(item);
         if (dkey) {
           if (isCb) {

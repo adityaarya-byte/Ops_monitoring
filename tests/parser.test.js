@@ -338,8 +338,15 @@ run('CB digest keeps volatile + something went wrong + insufficient funds', func
   assert.strictEqual(byToken.BTC, 1);
   const ifRow = rows.find(function (r) { return r.Token === 'BTC'; });
   assert.strictEqual(ifRow.Response, 'Insufficient funds');
+  assert.strictEqual(ifRow.Exchange, 'Insta', 'IF from CB channel must not be named CB');
+  assert.strictEqual(ifRow.Format, 'Insta-Digest');
   const sww = rows.find(function (r) { return r.Token === 'ETH'; });
   assert.strictEqual(sww.Response, 'Something went wrong');
+  assert.strictEqual(sww.Exchange, 'Insta');
+  assert.strictEqual(sww.Format, 'Insta-Digest');
+  const vol = rows.find(function (r) { return r.Token === 'FLT'; });
+  assert.strictEqual(vol.Exchange, 'CB');
+  assert.strictEqual(vol.Format, 'CB-Digest');
 });
 
 run('allowlist: per-channel keep rules', function () {
