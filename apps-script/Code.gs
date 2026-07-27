@@ -13,7 +13,7 @@
  *    8. Field extraction handles Slack *, backticks, bullets, and single-line labels
  *  FIXES (V2.3):
  *    9. Allowlist: non-CB channels keep ONLY insufficient/balance reasons
- *   10. cb-order-rejection keeps ONLY "market is too volatile..." (drops other CB reasons)
+ *   10. cb-order-rejection keeps volatile + "something went wrong" (drops other CB reasons)
  *   11. Parse Production inline (MANTAUSDT) + Gateio InsufficientFunds CREATE failures
  *   12. Alerts rebuild also filters stale transform rows
  * ============================================================================
