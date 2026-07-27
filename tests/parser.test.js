@@ -289,6 +289,28 @@ run('Futures Order rejected on alerts-exchange-funds → null', function () {
   assert.strictEqual(parseSlackAlert(text, TS, EXCHANGE_FUNDS), null);
 });
 
+run('CB digest: duplicated Slack text/attachment lines collapse to unique OrderIds', function () {
+  const bulletA =
+    '• LF buy | The market is too volatile right now. Please try again later | user 682f395a-459e-4ebc-bfd9-920ed1b1cd56 | 2026-07-26 15:39:33';
+  const bulletB =
+    '• LF buy | The market is too volatile right now. Please try again later | user 682f395a-459e-4ebc-bfd9-920ed1b1cd56 | 2026-07-26 15:39:27';
+  const header = [
+    ':rotating_light: Insta / OTC Order Rejections',
+    'Newly landed rejections: 2',
+    'The market is too volatile right now. Please try again later: 2',
+    ''
+  ].join('\n');
+  // Simulate Slack repeating the same digest 3× (text + attachment + blocks)
+  const text = [header, bulletA, bulletB, header, bulletA, bulletB, header, bulletA, bulletB].join('\n');
+
+  const rows = parseSlackAlert(text, TS, CB_CHANNEL);
+  assert.ok(rows);
+  assert.strictEqual(rows.length, 2, 'expected 2 LF rows, got ' + (rows && rows.length));
+  assert.strictEqual(rows[0].Token, 'LF');
+  assert.strictEqual(rows[1].Token, 'LF');
+  assert.notStrictEqual(rows[0].OrderId, rows[1].OrderId);
+});
+
 run('CB digest keeps volatile + something went wrong + insufficient funds', function () {
   const text = [
     ':rotating_light: Insta / OTC Order Rejections',

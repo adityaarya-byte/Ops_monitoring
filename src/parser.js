@@ -171,6 +171,33 @@ const ParserUtils = {
     return m ? ParserUtils.cleanField(m[1]) : s;
   },
 
+  /**
+   * Collapse duplicate alert lines (Slack often repeats the same digest in
+   * text + attachment + blocks).
+   */
+  dedupeAlertLines: function (text) {
+    if (!text) return '';
+    const seen = {};
+    const out = [];
+    var prevBlank = false;
+    String(text).split(/\r?\n/).forEach(function (line) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        if (!prevBlank && out.length) {
+          out.push('');
+          prevBlank = true;
+        }
+        return;
+      }
+      prevBlank = false;
+      const key = trimmed.replace(/`/g, '').replace(/\s+/g, ' ').toLowerCase();
+      if (seen[key]) return;
+      seen[key] = true;
+      out.push(trimmed);
+    });
+    return out.join('\n').trim();
+  },
+
   extractInsufficientMessage: function (text) {
     const fromMsg = ParserUtils.extractMsgFromDetails(text);
     if (fromMsg) return fromMsg;
@@ -230,7 +257,7 @@ const AlertFilters = {
 
   isCbInsufficientFundsReason: function (reason) {
     const r = ParserUtils.normalizeReason(reason);
-    return r.indexOf('insufficient funds') !== -1 || r.indexOf('insufficientfund') !== -1;
+    return r.indexOf('insufficient funds') !== -1 || r.indexOf('insufficientfunds') !== -1;
   },
 
   /** cb-order-rejection keep-list: volatile + SWW + insufficient funds */
@@ -334,7 +361,8 @@ const AlertFilters = {
  */
 function parseSlackAlert(rawText, timestamp, channelName, helpers) {
   if (!rawText || !String(rawText).trim()) return null;
-  const text = String(rawText).trim();
+  // Line-dedupe: Slack often repeats the same CB digest in text+attachment+blocks
+  const text = ParserUtils.dedupeAlertLines(String(rawText).trim());
   const normalized = ParserUtils.normalizeAlertText(text);
   const clean = ParserUtils.stripMarkdown(text);
   const ch = AlertFilters.channelKey(channelName);
@@ -638,7 +666,15 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
           RawText: line
         });
       });
-      if (expandedRows.length > 0) return expandedRows;
+      // Same digest can appear 2–3× in Slack text/attachment/blocks — keep unique OrderId
+      const seenOid = {};
+      const uniqueRows = [];
+      expandedRows.forEach(function (r) {
+        if (seenOid[r.OrderId]) return;
+        seenOid[r.OrderId] = true;
+        uniqueRows.push(r);
+      });
+      if (uniqueRows.length > 0) return uniqueRows;
       return null;
     }
   } catch (err) {

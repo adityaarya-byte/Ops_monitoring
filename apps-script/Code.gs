@@ -354,6 +354,33 @@ const ParserUtils = {
     return m ? ParserUtils.cleanField(m[1]) : s;
   },
 
+  /**
+   * Collapse duplicate alert lines (Slack often repeats the same digest in
+   * text + attachment + blocks). Blank lines preserved once between blocks.
+   */
+  dedupeAlertLines: function (text) {
+    if (!text) return '';
+    const seen = {};
+    const out = [];
+    var prevBlank = false;
+    String(text).split(/\r?\n/).forEach(function (line) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        if (!prevBlank && out.length) {
+          out.push('');
+          prevBlank = true;
+        }
+        return;
+      }
+      prevBlank = false;
+      const key = trimmed.replace(/`/g, '').replace(/\s+/g, ' ').toLowerCase();
+      if (seen[key]) return;
+      seen[key] = true;
+      out.push(trimmed);
+    });
+    return out.join('\n').trim();
+  },
+
   extractInsufficientMessage: function (text) {
     const fromMsg = ParserUtils.extractMsgFromDetails(text);
     if (fromMsg) return fromMsg;
@@ -464,7 +491,7 @@ const AlertFilters = {
 
   isCbInsufficientFundsReason: function (reason) {
     const r = ParserUtils.normalizeReason(reason);
-    return r.indexOf('insufficient funds') !== -1 || r.indexOf('insufficientfund') !== -1;
+    return r.indexOf('insufficient funds') !== -1 || r.indexOf('insufficientfunds') !== -1;
   },
 
   /** cb-order-rejection keep-list: volatile + SWW + insufficient funds */
@@ -579,7 +606,8 @@ const AlertFilters = {
 
 function parseSlackAlert(rawText, timestamp, channelName) {
   if (!rawText || !String(rawText).trim()) return null;
-  const text = String(rawText).trim();
+  // Line-dedupe: Slack often repeats the same CB digest in text+attachment+blocks
+  const text = ParserUtils.dedupeAlertLines(String(rawText).trim());
   const normalized = ParserUtils.normalizeAlertText(text);
   const clean = ParserUtils.stripMarkdown(text);
   const ch = AlertFilters.channelKey(channelName);
@@ -865,7 +893,15 @@ function parseSlackAlert(rawText, timestamp, channelName) {
           OrderId: dedupKey, Format: 'CB-Digest', Channel: channelName, RawText: line
         });
       });
-      if (expandedRows.length > 0) return expandedRows;
+      // Same digest can appear 2–3× in Slack text/attachment/blocks — keep unique OrderId
+      const seenOid = {};
+      const uniqueRows = [];
+      expandedRows.forEach(function (r) {
+        if (seenOid[r.OrderId]) return;
+        seenOid[r.OrderId] = true;
+        uniqueRows.push(r);
+      });
+      if (uniqueRows.length > 0) return uniqueRows;
       return null;
     }
 
@@ -884,6 +920,9 @@ function parseSlackAlert(rawText, timestamp, channelName) {
 /**
  * Webhooks often put the real body in attachments/blocks, not msg.text.
  * Without this, bullet alerts (• Symbol: B-S-HBAR_USDT) are skipped entirely.
+ *
+ * Slack MM digests often repeat the SAME bullet list in text + attachment +
+ * blocks — we chunk-dedupe then line-dedupe so CB Format F does not triple rows.
  */
 function extractSlackMessageText(msg) {
   if (!msg) return '';
@@ -917,12 +956,19 @@ function extractSlackMessageText(msg) {
     var out = '';
     elements.forEach(function (el) {
       if (!el) return;
-      if (el.text) out += el.text;
-      if (el.elements) out += flattenRichText(el.elements);
-      if (el.type === 'rich_text_section' || el.type === 'rich_text_list') {
+      // Walk typed containers once (do not also recurse via el.elements above)
+      if (
+        el.type === 'rich_text_section' ||
+        el.type === 'rich_text_list' ||
+        el.type === 'rich_text_preformatted' ||
+        el.type === 'rich_text_quote'
+      ) {
         out += flattenRichText(el.elements);
-        if (el.type === 'rich_text_list') out += '\n';
+        if (el.type === 'rich_text_list' || el.type === 'rich_text_preformatted') out += '\n';
+        return;
       }
+      if (el.text) out += el.text;
+      else if (el.elements) out += flattenRichText(el.elements);
     });
     return out;
   }
@@ -944,12 +990,71 @@ function extractSlackMessageText(msg) {
   const seen = {};
   const uniq = [];
   parts.forEach(function (p) {
-    if (!seen[p]) {
+    // Also skip a chunk that is an exact substring of an already-kept longer chunk
+    var skip = false;
+    const pNorm = p.replace(/`/g, '').replace(/\s+/g, ' ').trim();
+    for (var i = 0; i < uniq.length; i++) {
+      const uNorm = uniq[i].replace(/`/g, '').replace(/\s+/g, ' ').trim();
+      if (uNorm === pNorm) { skip = true; break; }
+      if (uNorm.indexOf(pNorm) !== -1 && pNorm.length > 40) { skip = true; break; }
+      if (pNorm.indexOf(uNorm) !== -1 && uNorm.length > 40) {
+        uniq[i] = p; // prefer longer/richer chunk
+        skip = true;
+        break;
+      }
+    }
+    if (!skip && !seen[p]) {
       seen[p] = true;
       uniq.push(p);
     }
   });
-  return uniq.join('\n').trim();
+  return ParserUtils.dedupeAlertLines(uniq.join('\n'));
+}
+
+/** Existing OrderId set for a transform sheet (skip re-appends). */
+function loadExistingOrderIds_(sheetName) {
+  const set = {};
+  try {
+    const data = SheetService.readAsObjects(sheetName, TX_HEADERS);
+    data.rows.forEach(function (r) {
+      if (r && r.OrderId) set[String(r.OrderId)] = true;
+    });
+  } catch (e) {
+    Logger.log('⚠️ loadExistingOrderIds_ ' + sheetName + ': ' + e.message);
+  }
+  return set;
+}
+
+/**
+ * One-shot cleanup: remove duplicate OrderId rows from transform / transform_cb
+ * (keeps first occurrence). Then run buildAlertsSheet().
+ */
+function dedupeTransformSheets() {
+  [CONFIG.SHEETS.TRANSFORM, CONFIG.SHEETS.TRANSFORM_CB].forEach(function (name) {
+    const sheet = SheetService.ensureSheetWithHeaders(name, TX_HEADERS);
+    const last = sheet.getLastRow();
+    if (last < 2) return;
+    const values = sheet.getRange(2, 1, last - 1, TX_HEADERS.length).getValues();
+    const orderIdIdx = TX_HEADERS.indexOf('OrderId');
+    const seen = {};
+    const kept = [];
+    var dropped = 0;
+    values.forEach(function (row) {
+      const oid = String(row[orderIdIdx] || '');
+      if (oid && seen[oid]) {
+        dropped++;
+        return;
+      }
+      if (oid) seen[oid] = true;
+      kept.push(row);
+    });
+    SheetService.clearSheetDataRows(name);
+    if (kept.length > 0) {
+      sheet.getRange(2, 1, kept.length, TX_HEADERS.length).setValues(kept);
+    }
+    Logger.log('🧹 ' + name + ': kept ' + kept.length + ', dropped ' + dropped + ' duplicate OrderId row(s)');
+  });
+  buildAlertsSheet();
 }
 
 /** Stage 1: Fetch Slack Messages with Self-Healing lookback window + Dedup */
@@ -1075,13 +1180,16 @@ function transformRawMessages() {
   const mainToAppend = [];
   const cbToAppend = [];
   const rawUpdates = [];
+  const existingMainIds = loadExistingOrderIds_(CONFIG.SHEETS.TRANSFORM);
+  const existingCbIds = loadExistingOrderIds_(CONFIG.SHEETS.TRANSFORM_CB);
 
-  var stats = { parsed: 0, kept: 0, filtered: 0, unparsed: 0 };
+  var stats = { parsed: 0, kept: 0, filtered: 0, unparsed: 0, dupSkipped: 0 };
 
   pendingRows.forEach(function (row) {
     var parsedList;
     try {
-      parsedList = parseSlackAlert(row.raw_text, row.posted_at, row.channel_name);
+      const cleaned = ParserUtils.dedupeAlertLines(row.raw_text || '');
+      parsedList = parseSlackAlert(cleaned, row.posted_at, row.channel_name);
     } catch (e) {
       parsedList = null;
       Logger.log('⚠️ Parse error row ' + row.__row + ': ' + e.message);
@@ -1102,9 +1210,26 @@ function transformRawMessages() {
           );
           return;
         }
+        const oid = item.OrderId ? String(item.OrderId) : '';
+        const isCb = AlertFilters.isCbChannel(item.Channel) || item.Format === 'CB-Digest';
+        if (oid) {
+          if (isCb) {
+            if (existingCbIds[oid]) {
+              stats.dupSkipped++;
+              return;
+            }
+            existingCbIds[oid] = true;
+          } else {
+            if (existingMainIds[oid]) {
+              stats.dupSkipped++;
+              return;
+            }
+            existingMainIds[oid] = true;
+          }
+        }
         stats.kept++;
         keptAny = true;
-        if (AlertFilters.isCbChannel(item.Channel) || item.Format === 'CB-Digest') {
+        if (isCb) {
           cbToAppend.push(item);
         } else {
           mainToAppend.push(item);
@@ -1133,6 +1258,7 @@ function transformRawMessages() {
     ' parsedRows=' + stats.parsed +
     ' kept=' + stats.kept +
     ' filtered=' + stats.filtered +
+    ' dupSkipped=' + stats.dupSkipped +
     ' unparsedMsgs=' + stats.unparsed
   );
 
