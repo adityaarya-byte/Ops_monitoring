@@ -13,7 +13,7 @@
  *    8. Field extraction handles Slack *, backticks, bullets, and single-line labels
  *  FIXES (V2.3):
  *    9. Allowlist: non-CB channels keep ONLY insufficient/balance reasons
- *   10. cb-order-rejection keeps volatile + "something went wrong" (drops other CB reasons)
+ *   10. cb-order-rejection keeps volatile + "something went wrong" + "insufficient funds"
  *   11. Parse Production inline (MANTAUSDT) + Gateio InsufficientFunds CREATE failures
  *   12. Alerts rebuild also filters stale transform rows
  * ============================================================================
@@ -462,12 +462,31 @@ const AlertFilters = {
     return r.indexOf('something went wrong') !== -1;
   },
 
-  /** cb-order-rejection keep-list: volatile + something went wrong */
+  isCbInsufficientFundsReason: function (reason) {
+    const r = ParserUtils.normalizeReason(reason);
+    return r.indexOf('insufficient funds') !== -1 || r.indexOf('insufficientfund') !== -1;
+  },
+
+  /** cb-order-rejection keep-list: volatile + SWW + insufficient funds */
   isCbKeepReason: function (reason) {
     return (
       AlertFilters.isVolatileReason(reason) ||
-      AlertFilters.isSomethingWentWrongReason(reason)
+      AlertFilters.isSomethingWentWrongReason(reason) ||
+      AlertFilters.isCbInsufficientFundsReason(reason)
     );
+  },
+
+  normalizeCbDigestReason: function (reason) {
+    if (AlertFilters.isVolatileReason(reason)) {
+      return 'The market is too volatile right now. Please try again later';
+    }
+    if (AlertFilters.isSomethingWentWrongReason(reason)) {
+      return 'Something went wrong';
+    }
+    if (AlertFilters.isCbInsufficientFundsReason(reason)) {
+      return 'Insufficient funds';
+    }
+    return ParserUtils.cleanField(reason);
   },
 
   isInsufficientReason: function (item) {
@@ -503,7 +522,7 @@ const AlertFilters = {
 
   /**
    * Channel rules:
-   *  - cb-order-rejection → volatile + "something went wrong"
+   *  - cb-order-rejection → volatile + "something went wrong" + "insufficient funds"
    *  - insufficient-funds-rails-* → ALL parsed reasons
    *  - alerts-exchange-funds-mercury → ALL parsed
    *  - alerts-exchange-funds → Insta.InternalTp + balance/insufficient; drop Futures / unsettled
@@ -810,7 +829,7 @@ function parseSlackAlert(rawText, timestamp, channelName) {
       }];
     }
 
-    // FORMAT F: cb-order-rejection digest — volatile + "something went wrong"
+    // FORMAT F: cb-order-rejection digest — volatile + SWW + insufficient funds
     if (
       AlertFilters.isCbChannel(channelName) ||
       /Insta\s*\/\s*OTC Order Rejections/i.test(text) ||
@@ -838,13 +857,10 @@ function parseSlackAlert(rawText, timestamp, channelName) {
         if (isNaN(alertTs.getTime())) return;
         const tsKey = Utilities.formatDate(alertTs, Session.getScriptTimeZone(), 'yyyyMMddHHmmss');
         const dedupKey = token + '_' + userId.substring(0, 8) + '_' + tsKey + '_F';
-        var response = AlertFilters.isVolatileReason(reason)
-          ? 'The market is too volatile right now. Please try again later'
-          : 'Something went wrong';
         expandedRows.push({
           Timestamp: alertTs, Exchange: 'CB', Token: token, Side: side,
           Qty: '', Account: userId,
-          Response: response,
+          Response: AlertFilters.normalizeCbDigestReason(reason),
           ErrorCode: '',
           OrderId: dedupKey, Format: 'CB-Digest', Channel: channelName, RawText: line
         });

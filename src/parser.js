@@ -228,12 +228,31 @@ const AlertFilters = {
     return r.indexOf('something went wrong') !== -1;
   },
 
-  /** cb-order-rejection keep-list: volatile + something went wrong */
+  isCbInsufficientFundsReason: function (reason) {
+    const r = ParserUtils.normalizeReason(reason);
+    return r.indexOf('insufficient funds') !== -1 || r.indexOf('insufficientfund') !== -1;
+  },
+
+  /** cb-order-rejection keep-list: volatile + SWW + insufficient funds */
   isCbKeepReason: function (reason) {
     return (
       AlertFilters.isVolatileReason(reason) ||
-      AlertFilters.isSomethingWentWrongReason(reason)
+      AlertFilters.isSomethingWentWrongReason(reason) ||
+      AlertFilters.isCbInsufficientFundsReason(reason)
     );
+  },
+
+  normalizeCbDigestReason: function (reason) {
+    if (AlertFilters.isVolatileReason(reason)) {
+      return 'The market is too volatile right now. Please try again later';
+    }
+    if (AlertFilters.isSomethingWentWrongReason(reason)) {
+      return 'Something went wrong';
+    }
+    if (AlertFilters.isCbInsufficientFundsReason(reason)) {
+      return 'Insufficient funds';
+    }
+    return ParserUtils.cleanField(reason);
   },
 
   isInsufficientReason: function (item) {
@@ -576,7 +595,7 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
       }];
     }
 
-    // FORMAT F: cb-order-rejection digest — volatile + "something went wrong"
+    // FORMAT F: cb-order-rejection digest — volatile + SWW + insufficient funds
     if (
       AlertFilters.isCbChannel(channelName) ||
       /Insta\s*\/\s*OTC Order Rejections/i.test(text) ||
@@ -604,9 +623,6 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
         if (isNaN(alertTs.getTime())) return;
         const tsKey = formatDate(alertTs);
         const dedupKey = token + '_' + userId.substring(0, 8) + '_' + tsKey + '_F';
-        var response = AlertFilters.isVolatileReason(reason)
-          ? 'The market is too volatile right now. Please try again later'
-          : 'Something went wrong';
         expandedRows.push({
           Timestamp: alertTs,
           Exchange: 'CB',
@@ -614,7 +630,7 @@ function parseSlackAlert(rawText, timestamp, channelName, helpers) {
           Side: side,
           Qty: '',
           Account: userId,
-          Response: response,
+          Response: AlertFilters.normalizeCbDigestReason(reason),
           ErrorCode: '',
           OrderId: dedupKey,
           Format: 'CB-Digest',

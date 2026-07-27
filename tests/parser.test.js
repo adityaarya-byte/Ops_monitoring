@@ -289,7 +289,7 @@ run('Futures Order rejected on alerts-exchange-funds → null', function () {
   assert.strictEqual(parseSlackAlert(text, TS, EXCHANGE_FUNDS), null);
 });
 
-run('CB digest keeps volatile + something went wrong; drops insufficient funds', function () {
+run('CB digest keeps volatile + something went wrong + insufficient funds', function () {
   const text = [
     ':rotating_light: Insta / OTC Order Rejections',
     'Newly landed rejections: 7',
@@ -303,17 +303,20 @@ run('CB digest keeps volatile + something went wrong; drops insufficient funds',
 
   const rows = parseSlackAlert(text, TS, CB_CHANNEL);
   assert.ok(rows);
-  assert.strictEqual(rows.length, 3);
-  const tokens = rows.map(function (r) { return r.Token; }).sort();
-  assert.deepStrictEqual(tokens, ['ETH', 'FLT', 'FLT']);
-  const sww = rows.filter(function (r) { return /something went wrong/i.test(r.Response); });
-  assert.strictEqual(sww.length, 1);
-  assert.strictEqual(sww[0].Token, 'ETH');
-  assert.strictEqual(sww[0].Response, 'Something went wrong');
+  assert.strictEqual(rows.length, 4);
+  const byToken = {};
   rows.forEach(function (r) {
+    byToken[r.Token] = (byToken[r.Token] || 0) + 1;
     assert.ok(AlertFilters.isCbKeepReason(r.Response));
     assert.ok(AlertFilters.shouldKeepAlert(r));
   });
+  assert.strictEqual(byToken.FLT, 2);
+  assert.strictEqual(byToken.ETH, 1);
+  assert.strictEqual(byToken.BTC, 1);
+  const ifRow = rows.find(function (r) { return r.Token === 'BTC'; });
+  assert.strictEqual(ifRow.Response, 'Insufficient funds');
+  const sww = rows.find(function (r) { return r.Token === 'ETH'; });
+  assert.strictEqual(sww.Response, 'Something went wrong');
 });
 
 run('allowlist: per-channel keep rules', function () {
@@ -417,7 +420,7 @@ run('allowlist: per-channel keep rules', function () {
   );
 });
 
-run('allowlist: CB keeps volatile + something went wrong', function () {
+run('allowlist: CB keeps volatile + SWW + insufficient funds', function () {
   assert.strictEqual(
     AlertFilters.shouldKeepAlert({
       Channel: CB_CHANNEL,
@@ -432,7 +435,7 @@ run('allowlist: CB keeps volatile + something went wrong', function () {
       Response: 'insufficient funds',
       Format: 'CB-Digest'
     }),
-    false
+    true
   );
   assert.strictEqual(
     AlertFilters.shouldKeepAlert({
@@ -441,6 +444,14 @@ run('allowlist: CB keeps volatile + something went wrong', function () {
       Format: 'CB-Digest'
     }),
     true
+  );
+  assert.strictEqual(
+    AlertFilters.shouldKeepAlert({
+      Channel: CB_CHANNEL,
+      Response: 'price band breach',
+      Format: 'CB-Digest'
+    }),
+    false
   );
 });
 
