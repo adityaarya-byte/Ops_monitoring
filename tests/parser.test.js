@@ -289,7 +289,7 @@ run('Futures Order rejected on alerts-exchange-funds → null', function () {
   assert.strictEqual(parseSlackAlert(text, TS, EXCHANGE_FUNDS), null);
 });
 
-run('CB digest keeps only volatile lines; drops insufficient funds / something went wrong', function () {
+run('CB digest keeps volatile + something went wrong; drops insufficient funds', function () {
   const text = [
     ':rotating_light: Insta / OTC Order Rejections',
     'Newly landed rejections: 7',
@@ -303,10 +303,15 @@ run('CB digest keeps only volatile lines; drops insufficient funds / something w
 
   const rows = parseSlackAlert(text, TS, CB_CHANNEL);
   assert.ok(rows);
-  assert.strictEqual(rows.length, 2);
+  assert.strictEqual(rows.length, 3);
+  const tokens = rows.map(function (r) { return r.Token; }).sort();
+  assert.deepStrictEqual(tokens, ['ETH', 'FLT', 'FLT']);
+  const sww = rows.filter(function (r) { return /something went wrong/i.test(r.Response); });
+  assert.strictEqual(sww.length, 1);
+  assert.strictEqual(sww[0].Token, 'ETH');
+  assert.strictEqual(sww[0].Response, 'Something went wrong');
   rows.forEach(function (r) {
-    assert.strictEqual(r.Token, 'FLT');
-    assert.ok(AlertFilters.isVolatileReason(r.Response));
+    assert.ok(AlertFilters.isCbKeepReason(r.Response));
     assert.ok(AlertFilters.shouldKeepAlert(r));
   });
 });
@@ -412,7 +417,7 @@ run('allowlist: per-channel keep rules', function () {
   );
 });
 
-run('allowlist: CB keeps volatile only', function () {
+run('allowlist: CB keeps volatile + something went wrong', function () {
   assert.strictEqual(
     AlertFilters.shouldKeepAlert({
       Channel: CB_CHANNEL,
@@ -435,7 +440,7 @@ run('allowlist: CB keeps volatile only', function () {
       Response: 'something went wrong',
       Format: 'CB-Digest'
     }),
-    false
+    true
   );
 });
 

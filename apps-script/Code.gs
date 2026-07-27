@@ -457,6 +457,19 @@ const AlertFilters = {
     return r === target || r.indexOf(target) !== -1;
   },
 
+  isSomethingWentWrongReason: function (reason) {
+    const r = ParserUtils.normalizeReason(reason);
+    return r.indexOf('something went wrong') !== -1;
+  },
+
+  /** cb-order-rejection keep-list: volatile + something went wrong */
+  isCbKeepReason: function (reason) {
+    return (
+      AlertFilters.isVolatileReason(reason) ||
+      AlertFilters.isSomethingWentWrongReason(reason)
+    );
+  },
+
   isInsufficientReason: function (item) {
     const hay = [item.Response, item.ErrorCode, item.RawText, item.reason]
       .join(' ')
@@ -490,7 +503,7 @@ const AlertFilters = {
 
   /**
    * Channel rules:
-   *  - cb-order-rejection → volatile only
+   *  - cb-order-rejection → volatile + "something went wrong"
    *  - insufficient-funds-rails-* → ALL parsed reasons
    *  - alerts-exchange-funds-mercury → ALL parsed
    *  - alerts-exchange-funds → Insta.InternalTp + balance/insufficient; drop Futures / unsettled
@@ -504,7 +517,7 @@ const AlertFilters = {
     const resp = String(item.Response || item.reason || '');
 
     if (AlertFilters.isCbChannel(ch) || item.Format === 'CB-Digest') {
-      return AlertFilters.isVolatileReason(resp);
+      return AlertFilters.isCbKeepReason(resp);
     }
 
     if (AlertFilters.isRailsChannel(ch)) {
@@ -797,7 +810,7 @@ function parseSlackAlert(rawText, timestamp, channelName) {
       }];
     }
 
-    // FORMAT F: cb-order-rejection digest — ONLY volatile-market lines
+    // FORMAT F: cb-order-rejection digest — volatile + "something went wrong"
     if (
       AlertFilters.isCbChannel(channelName) ||
       /Insta\s*\/\s*OTC Order Rejections/i.test(text) ||
@@ -817,7 +830,7 @@ function parseSlackAlert(rawText, timestamp, channelName) {
         const side = tokenSide[1].toLowerCase();
         if (side !== 'buy' && side !== 'sell') return;
         const reason = parts[1].trim();
-        if (!AlertFilters.isVolatileReason(reason)) return;
+        if (!AlertFilters.isCbKeepReason(reason)) return;
         const userStr = parts[2].trim();
         const userId = userStr.startsWith('user ') ? userStr.substring(5).trim() : userStr;
         const tsStr = parts[3].trim();
@@ -825,10 +838,13 @@ function parseSlackAlert(rawText, timestamp, channelName) {
         if (isNaN(alertTs.getTime())) return;
         const tsKey = Utilities.formatDate(alertTs, Session.getScriptTimeZone(), 'yyyyMMddHHmmss');
         const dedupKey = token + '_' + userId.substring(0, 8) + '_' + tsKey + '_F';
+        var response = AlertFilters.isVolatileReason(reason)
+          ? 'The market is too volatile right now. Please try again later'
+          : 'Something went wrong';
         expandedRows.push({
           Timestamp: alertTs, Exchange: 'CB', Token: token, Side: side,
           Qty: '', Account: userId,
-          Response: 'The market is too volatile right now. Please try again later',
+          Response: response,
           ErrorCode: '',
           OrderId: dedupKey, Format: 'CB-Digest', Channel: channelName, RawText: line
         });

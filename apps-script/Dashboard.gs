@@ -91,33 +91,22 @@ function getOrCreate_(sheetName, headers) {
 function classifyReason_(reason, format, channel) {
   var r = String(reason || '').toLowerCase();
   var ch = String(channel || '').toLowerCase();
-
-  // CB feed / volatility always wins
-  if (
-    r.indexOf('too volatile') !== -1 ||
-    r.indexOf('try again later') !== -1 ||
+  var isCbCh =
     ch === 'cb-order-rejection' ||
     ch === 'cb-rejection' ||
-    ch.indexOf('cb-order-rejection') !== -1
-  ) {
-    // Only force CB type when reason is volatile OR channel is CB.
-    // If channel is CB but reason somehow isn't volatile, still CB/Market Volatility
-    // (pipeline already filters CB to volatile-only).
-    if (
-      ch === 'cb-order-rejection' ||
-      ch === 'cb-rejection' ||
-      ch.indexOf('cb-order-rejection') !== -1 ||
-      r.indexOf('too volatile') !== -1 ||
-      r.indexOf('try again later') !== -1
-    ) {
-      return {
-        rejectionType: 'CB Rejection',
-        reasonCategory: 'Market Volatility',
-        severity: 'High'
-      };
-    }
+    ch.indexOf('cb-order-rejection') !== -1 ||
+    ch.indexOf('cb-rejection') !== -1;
+
+  // Market volatility (CB) — reason wins regardless of channel
+  if (r.indexOf('too volatile') !== -1 || r.indexOf('try again later') !== -1) {
+    return {
+      rejectionType: 'CB Rejection',
+      reasonCategory: 'Market Volatility',
+      severity: 'High'
+    };
   }
 
+  // Keyword rules next (e.g. "something went wrong" → Insta / System)
   for (var i = 0; i < CLASSIFY_RULES.length; i++) {
     if (r && r.indexOf(CLASSIFY_RULES[i].kw) !== -1) {
       return {
@@ -128,11 +117,20 @@ function classifyReason_(reason, format, channel) {
     }
   }
 
-  if (format === 'B' || format === 'CB-Digest') {
+  // CB channel / digest fallback → treat as CB Rejection
+  if (isCbCh || format === 'CB-Digest') {
     return {
-      rejectionType: format === 'CB-Digest' ? 'CB Rejection' : 'Insta Rejection',
-      reasonCategory: format === 'CB-Digest' ? 'Market Volatility' : 'OTC Order Failed',
-      severity: format === 'CB-Digest' ? 'High' : 'Medium'
+      rejectionType: 'CB Rejection',
+      reasonCategory: 'Market Volatility',
+      severity: 'High'
+    };
+  }
+
+  if (format === 'B') {
+    return {
+      rejectionType: 'Insta Rejection',
+      reasonCategory: 'OTC Order Failed',
+      severity: 'Medium'
     };
   }
 
