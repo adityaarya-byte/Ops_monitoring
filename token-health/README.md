@@ -1,6 +1,10 @@
 # Token Health
 
-Google Apps Script project that tracks token listing / volume / deposit-withdraw health across Binance, KuCoin, and Gate, and writes results into a Google Sheet.
+Single-file Google Apps Script tracker for token listing / volume / deposit-withdraw health across Binance, KuCoin, and Gate.
+
+## File
+
+- `Code.gs` — paste this into Apps Script (entry point: `runAllCryptoTrackers`)
 
 ## Sheets required
 
@@ -11,37 +15,19 @@ Google Apps Script project that tracks token listing / volume / deposit-withdraw
 | `ALERTS` | Append-only alert history |
 | `Monitoring` | Flattened monitoring export (A–G) |
 
-## Apps Script setup
+## Setup
 
-1. Open the target Google Sheet → **Extensions → Apps Script**.
-2. Copy each `.gs` file from this folder into the Apps Script project (same filenames).
-3. Set the CoinMarketCap API key (optional but recommended):
-
-   ```javascript
-   // Run once in the script editor:
-   function setCmcApiKey() {
-     PropertiesService.getScriptProperties()
-       .setProperty('CMC_API_KEY', 'YOUR_KEY_HERE');
-   }
-   ```
-
-   If unset, the script falls back to `CONFIG.CMC_API_KEY` in `Config.gs`.
-
-4. Create a time-driven trigger on `runAllCryptoTrackers` (e.g. every 15–30 minutes).
+1. Open the Google Sheet → **Extensions → Apps Script**.
+2. Replace the default script with `Code.gs`.
+3. Run `setCmcApiKey()` once after pasting your CMC key into that function (or set Script Property `CMC_API_KEY`).
+4. Create a time-driven trigger on `runAllCryptoTrackers`.
 
 ## Binance volume reliability
 
-Binance 24h ticker fetches can intermittently fail (timeouts, 418/429, empty/non-JSON bodies). When that happened previously, volumes were silently written as `0`.
+Binance 24h ticker fetches can intermittently fail (timeouts, 418/429/451, empty/non-JSON). Previously that silently wrote volume `0`.
 
-This project mitigates that by:
+This script:
 
-- Checking HTTP status before parsing
-- Retrying with backoff across multiple Binance hosts
-- Logging response codes / payload shape on failure
-- Preserving the previous HEALTH Binance volume column when a fresh Binance ticker pull fails (so a flaky fetch does not wipe good data to zeros)
-
-## Entry point
-
-```javascript
-runAllCryptoTrackers()
-```
+- Retries with backoff across multiple Binance hosts
+- Validates HTTP status + JSON array shape
+- Preserves the previous HEALTH Binance volume column when a fresh pull fails

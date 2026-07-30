@@ -1,7 +1,68 @@
 /**
- * Token Health — main entry point.
+ * Token Health — single-file Google Apps Script
  * Sheets required: HEALTH, CHAIN, ALERTS, Monitoring
+ *
+ * Binance volume fix:
+ * - Retries across multiple hosts with HTTP/JSON validation
+ * - Preserves previous HEALTH Binance volumes if live ticker pull fails
+ *   (avoids wiping good data to 0 on flaky responses)
  */
+
+var CONFIG = {
+  CMC_API_KEY: '', // prefer Script Property CMC_API_KEY via setCmcApiKey()
+  CMC_CHUNK_SIZE: 60,
+  CMC_SLEEP_MS: 100,
+  TIMEZONE: 'Asia/Kolkata',
+  BINANCE_TICKER_URLS: [
+    'https://data-api.binance.vision/api/v3/ticker/24hr',
+    'https://api.binance.com/api/v3/ticker/24hr',
+    'https://api1.binance.com/api/v3/ticker/24hr',
+    'https://api2.binance.com/api/v3/ticker/24hr',
+    'https://api3.binance.com/api/v3/ticker/24hr'
+  ],
+  BINANCE_CHAIN_URL: 'https://www.binance.com/bapi/capital/v2/public/capital/getNetworkCoinAll',
+  KUCOIN_TICKER_URL: 'https://api.kucoin.com/api/v1/market/allTickers',
+  KUCOIN_CHAIN_URL: 'https://api.kucoin.com/api/v1/currencies',
+  GATE_TICKER_URL: 'https://api.gateio.ws/api/v4/spot/tickers',
+  GATE_CHAIN_URL: 'https://api.gateio.ws/api/v4/spot/currencies',
+  BINANCE_MAX_ATTEMPTS: 3,
+  BINANCE_RETRY_SLEEP_MS: 400,
+  ALERT_RECIPIENTS: [
+    'aditya.arya@coindcx.com',
+    'abdul.khan@coindcx.com',
+    'akash.naidu@coindcx.com',
+    'ayush.agarwal@coindcx.com',
+    'chitresh.kashyap@coindcx.com',
+    'cletus.dias@coindcx.com',
+    'harsh.pandey@coindcx.com',
+    'harshit.gupta@coindcx.com',
+    'jatin.bisht@coindcx.com',
+    'jayadrath.rondal@coindcx.com',
+    'mihir.sutariya@coindcx.com',
+    'mohit.mittal@coindcx.com',
+    'obaid.rehman@coindcx.com',
+    'ronak.keny@coindcx.com',
+    'sujay.patil@coindcx.com',
+    'therese.joseph@coindcx.com'
+  ]
+};
+
+/** Run once from the Apps Script editor to store the CMC key securely. */
+function setCmcApiKey() {
+  var key = 'PASTE_YOUR_CMC_KEY_HERE';
+  if (!key || key.indexOf('PASTE_') === 0) {
+    throw new Error('Replace PASTE_YOUR_CMC_KEY_HERE with your real CMC API key, then run setCmcApiKey().');
+  }
+  PropertiesService.getScriptProperties().setProperty('CMC_API_KEY', key);
+  Logger.log('CMC_API_KEY saved to Script Properties.');
+}
+
+function getCmcApiKey_() {
+  var fromProps = PropertiesService.getScriptProperties().getProperty('CMC_API_KEY');
+  if (fromProps && String(fromProps).trim()) return String(fromProps).trim();
+  return CONFIG.CMC_API_KEY || '';
+}
+
 function runAllCryptoTrackers() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
 
@@ -62,10 +123,10 @@ function runAllCryptoTrackers() {
 
   var tokenValues = healthABRange.map(function (row) {
     var t = row[0] ? row[0].toString().trim() : '';
-    return t.startsWith('#') || t === '' ? '' : t.toUpperCase();
+    return (t.startsWith('#') || t === '') ? '' : t.toUpperCase();
   });
   var idValues = idRange.map(function (row) {
-    return row[0] && !isNaN(row[0]) && row[0] !== '' ? row[0] : '';
+    return (row[0] && !isNaN(row[0]) && row[0] !== '') ? row[0] : '';
   });
 
   var targetTokens = new Set(tokenValues.filter(function (t) { return t !== ''; }));
@@ -77,34 +138,205 @@ function runAllCryptoTrackers() {
   }
 
   // Snapshot existing Binance volumes BEFORE overwrite (fallback if live fetch fails)
-  var previousBinanceVolumes = readPreviousBinanceVolumes_(healthSheet, tokenValues);
+  var previousBinanceVolumes = {};
+  try {
+    var prevVols = healthSheet.getRange(2, 6, tokenValues.length, 1).getValues(); // Col F
+    for (var pi = 0; pi < tokenValues.length; pi++) {
+      if (!tokenValues[pi]) continue;
+      var pv = prevVols[pi][0];
+      if (pv !== '' && pv !== null && !isNaN(pv)) previousBinanceVolumes[tokenValues[pi]] = parseFloat(pv);
+    }
+  } catch (ePrev) {
+    Logger.log('⚠️ Could not snapshot previous Binance volumes: ' + ePrev);
+  }
 
   // =========================================================
   // PHASE 3: FETCH TICKERS AND CHAIN MATRICES
   // =========================================================
   Logger.log('🔄 Running synchronized endpoint queries...');
-  var snap = fetchExchangeSnapshots_(targetTokens);
 
-  var binanceVolMap = snap.binanceVolMap || {};
-  var kucoinVolMap = snap.kucoinVolMap || {};
-  var gateVolMap = snap.gateVolMap || {};
-  var binanceListedSet = snap.binanceListedSet || new Set();
-  var kucoinListedSet = snap.kucoinListedSet || new Set();
-  var gateListedSet = snap.gateListedSet || new Set();
-  var masterChainMap = snap.masterChainMap || {};
-  var kucoinGlobalStatus = snap.kucoinGlobalStatus || {};
+  // --- Binance tickers (dedicated retry path) ---
+  var binanceTicker = fetchBinanceTickersReliable_();
+  var binanceVolMap = binanceTicker.volMap;
+  var binanceListedSet = binanceTicker.listedSet;
+  var binanceOk = binanceTicker.ok;
 
-  if (!snap.binanceOk) {
-    Logger.log(
-      '⚠️ Binance ticker unavailable — preserving previous HEALTH Binance volumes where present. Detail: ' +
-      (snap.binanceError || 'unknown')
-    );
+  if (!binanceOk) {
+    Logger.log('⚠️ Binance ticker unavailable — preserving previous HEALTH Binance volumes. Detail: ' + binanceTicker.error);
+  }
+
+  var parallelRequests = [
+    { url: CONFIG.BINANCE_CHAIN_URL, method: 'get', muteHttpExceptions: true },
+    { url: CONFIG.KUCOIN_TICKER_URL, method: 'get', muteHttpExceptions: true },
+    { url: CONFIG.KUCOIN_CHAIN_URL, method: 'get', muteHttpExceptions: true },
+    { url: CONFIG.GATE_TICKER_URL, method: 'get', muteHttpExceptions: true },
+    { url: CONFIG.GATE_CHAIN_URL, method: 'get', muteHttpExceptions: true }
+  ];
+  var responses = UrlFetchApp.fetchAll(parallelRequests);
+
+  var kucoinVolMap = {};
+  var gateVolMap = {};
+  var kucoinListedSet = new Set();
+  var gateListedSet = new Set();
+  var masterChainMap = {};
+  var kucoinGlobalStatus = {};
+
+  try {
+    if (responses[1].getResponseCode() === 200) {
+      var kJson = JSON.parse(responses[1].getContentText());
+      if (kJson.data && kJson.data.ticker) {
+        kJson.data.ticker.forEach(function (t) {
+          var symSplit = String(t.symbol || '').toUpperCase().split('-');
+          if (symSplit.length > 0 && symSplit[0]) {
+            var tok = symSplit[0];
+            kucoinListedSet.add(tok);
+            if (String(t.symbol).toUpperCase().endsWith('-USDT')) {
+              kucoinVolMap[tok] = parseFloat(t.volValue) || 0.0;
+            }
+          }
+        });
+      }
+    } else {
+      Logger.log('❌ KuCoin ticker HTTP ' + responses[1].getResponseCode());
+    }
+  } catch (e) {
+    Logger.log('❌ KuCoin ticker parse failed: ' + e);
+  }
+
+  try {
+    if (responses[3].getResponseCode() === 200) {
+      var gJson = JSON.parse(responses[3].getContentText());
+      if (Array.isArray(gJson)) {
+        gJson.forEach(function (t) {
+          var symSplit = String(t.currency_pair || '').toUpperCase().split('_');
+          if (symSplit.length > 0 && symSplit[0]) {
+            var tokG = symSplit[0];
+            gateListedSet.add(tokG);
+            if (String(t.currency_pair).toUpperCase().endsWith('_USDT')) {
+              gateVolMap[tokG] = parseFloat(t.quote_volume) || 0.0;
+            }
+          }
+        });
+      }
+    } else {
+      Logger.log('❌ Gate ticker HTTP ' + responses[3].getResponseCode());
+    }
+  } catch (e) {
+    Logger.log('❌ Gate ticker parse failed: ' + e);
+  }
+
+  function initTokenChain(token, chain) {
+    var cleanChain = String(chain).trim().toUpperCase();
+    if (!masterChainMap[token]) masterChainMap[token] = {};
+    if (!masterChainMap[token][cleanChain]) {
+      masterChainMap[token][cleanChain] = {
+        binance_deposit: 'NO', binance_withdraw: 'NO',
+        kucoin_deposit: 'NO', kucoin_withdraw: 'NO',
+        gate_deposit: 'NO', gate_withdraw: 'NO'
+      };
+    }
+    return masterChainMap[token][cleanChain];
+  }
+
+  try {
+    if (responses[0].getResponseCode() === 200) {
+      var bChainJson = JSON.parse(responses[0].getContentText());
+      if (bChainJson && bChainJson.data) {
+        bChainJson.data.forEach(function (coin) {
+          var token = String(coin.coin || '').toUpperCase();
+          if (targetTokens.has(token) && coin.networkList) {
+            coin.networkList.forEach(function (net) {
+              var r = initTokenChain(token, net.network);
+              r.binance_deposit = net.depositEnable ? 'Yes' : 'NO';
+              r.binance_withdraw = net.withdrawEnable ? 'Yes' : 'NO';
+            });
+          }
+        });
+      }
+    } else {
+      Logger.log('❌ Binance chain HTTP ' + responses[0].getResponseCode());
+    }
+  } catch (e) {
+    Logger.log('❌ Binance chain parse failed: ' + e);
+  }
+
+  try {
+    if (responses[4].getResponseCode() === 200) {
+      var gChainJson = JSON.parse(responses[4].getContentText());
+      if (Array.isArray(gChainJson)) {
+        gChainJson.forEach(function (coin) {
+          var token = String(coin.currency || '').toUpperCase();
+          gateListedSet.add(token);
+          if (targetTokens.has(token) && coin.chains) {
+            coin.chains.forEach(function (c) {
+              var r = initTokenChain(token, c.name);
+              r.gate_deposit = !c.deposit_disabled ? 'Yes' : 'NO';
+              r.gate_withdraw = !c.withdraw_disabled ? 'Yes' : 'NO';
+            });
+          }
+        });
+      }
+    } else {
+      Logger.log('❌ Gate chain HTTP ' + responses[4].getResponseCode());
+    }
+  } catch (e) {
+    Logger.log('❌ Gate chain parse failed: ' + e);
+  }
+
+  try {
+    if (responses[2].getResponseCode() === 200) {
+      var kChainJson = JSON.parse(responses[2].getContentText());
+      if (kChainJson && kChainJson.data) {
+        kChainJson.data.forEach(function (coin) {
+          var token = String(coin.currency || '').toUpperCase();
+          kucoinListedSet.add(token);
+          if (targetTokens.has(token)) {
+            kucoinGlobalStatus[token] = {
+              deposit: coin.isDepositEnabled ? 'Yes' : 'NO',
+              withdraw: coin.isWithdrawEnabled ? 'Yes' : 'NO'
+            };
+          }
+        });
+      }
+    } else {
+      Logger.log('❌ KuCoin chain HTTP ' + responses[2].getResponseCode());
+    }
+  } catch (e) {
+    Logger.log('❌ KuCoin chain parse failed: ' + e);
   }
 
   // =========================================================
   // PHASE 4: FETCH COINMARKETCAP QUOTES
   // =========================================================
-  var cmcCoinData = fetchCmcQuotes_(validIds);
+  var apiKey = getCmcApiKey_();
+  var chunkSize = CONFIG.CMC_CHUNK_SIZE;
+  var cmcCoinData = {};
+
+  if (!apiKey) {
+    Logger.log('⚠️ CMC API key missing — skip quotes. Run setCmcApiKey() or set Script Property CMC_API_KEY.');
+  } else if (validIds.length > 0) {
+    for (var ci = 0; ci < validIds.length; ci += chunkSize) {
+      var chunk = validIds.slice(ci, ci + chunkSize);
+      var cmcUrl = 'https://pro-api.coinmarketcap.com/v2/cryptocurrency/quotes/latest?id=' +
+        chunk.join(',') + '&convert=USD';
+      try {
+        var cmcResp = UrlFetchApp.fetch(cmcUrl, {
+          method: 'GET',
+          headers: { 'X-CMC_PRO_API_KEY': apiKey, Accept: 'application/json' },
+          muteHttpExceptions: true
+        });
+        if (cmcResp.getResponseCode() === 200) {
+          var cmcJson = JSON.parse(cmcResp.getContentText());
+          if (cmcJson.data) cmcCoinData = Object.assign(cmcCoinData, cmcJson.data);
+        } else {
+          Logger.log('❌ CMC HTTP ' + cmcResp.getResponseCode() + ' for chunk starting at ' + ci);
+        }
+      } catch (e) {
+        Logger.log('❌ CMC fetch failed: ' + e);
+      }
+      Utilities.sleep(CONFIG.CMC_SLEEP_MS);
+    }
+  }
 
   // =========================================================
   // PHASE 5: EXECUTE HEALTH MATRIX UPDATES
@@ -148,16 +380,11 @@ function runAllCryptoTrackers() {
     var kucoinListed = kucoinListedSet.has(rawToken) ? 'Yes' : 'No';
     var gateListed = gateListedSet.has(rawToken) ? 'Yes' : 'No';
 
-    // Volume resolution:
-    // 1) live Binance map when fetch succeeded
-    // 2) if fetch failed, keep previous sheet value (avoid wiping to 0)
-    // 3) else 0
     var binanceVol = 0.0;
-    if (snap.binanceOk) {
+    if (binanceOk) {
       binanceVol = binanceVolMap.hasOwnProperty(rawToken) ? binanceVolMap[rawToken] : 0.0;
     } else if (previousBinanceVolumes.hasOwnProperty(rawToken)) {
       binanceVol = previousBinanceVolumes[rawToken];
-      // If we preserved volume from a prior successful run, treat as listed
       if (binanceListed === 'No' && binanceVol > 0) binanceListed = 'Yes';
     }
 
@@ -174,19 +401,12 @@ function runAllCryptoTrackers() {
     ]);
 
     monitoringOutput.push([
-      rawToken,
-      rawEcode,
-      rawCmcId,
-      cmcRank,
-      binanceListed,
-      kucoinListed,
-      gateListed
+      rawToken, rawEcode, rawCmcId, cmcRank, binanceListed, kucoinListed, gateListed
     ]);
   }
 
   healthSheet.getRange(2, 4, healthOutput.length, 9).setValues(healthOutput);
-  Logger.log('📊 HEALTH Tab metrics compiled cleanly.' +
-    (snap.binanceOk ? '' : ' (Binance volumes preserved from previous run)'));
+  Logger.log('📊 HEALTH Tab metrics compiled cleanly.' + (binanceOk ? '' : ' (Binance volumes preserved from previous run)'));
 
   var monitoringMaxRows = monitoringSheet.getMaxRows();
   if (monitoringMaxRows > 1) {
@@ -229,23 +449,14 @@ function runAllCryptoTrackers() {
         if (data.binance_deposit === 'Yes' && data.binance_withdraw === 'Yes') liveTokenExchangeMap[token].add('Binance');
         if (data.gate_deposit === 'Yes' && data.gate_withdraw === 'Yes') liveTokenExchangeMap[token].add('Gate');
 
-        if (data.kucoin_deposit === 'NO' && data.kucoin_withdraw === 'Yes') {
-          d1w1ExchangeMap[token].add('KuCoin');
-        } else if (previousD1W1Chains[token + '_KUCOIN_' + chain]) {
-          brokenD1W1Targets[token].push('KuCoin (' + chain + ')');
-        }
+        if (data.kucoin_deposit === 'NO' && data.kucoin_withdraw === 'Yes') d1w1ExchangeMap[token].add('KuCoin');
+        else if (previousD1W1Chains[token + '_KUCOIN_' + chain]) brokenD1W1Targets[token].push('KuCoin (' + chain + ')');
 
-        if (data.binance_deposit === 'NO' && data.binance_withdraw === 'Yes') {
-          d1w1ExchangeMap[token].add('Binance');
-        } else if (previousD1W1Chains[token + '_BINANCE_' + chain]) {
-          brokenD1W1Targets[token].push('Binance (' + chain + ')');
-        }
+        if (data.binance_deposit === 'NO' && data.binance_withdraw === 'Yes') d1w1ExchangeMap[token].add('Binance');
+        else if (previousD1W1Chains[token + '_BINANCE_' + chain]) brokenD1W1Targets[token].push('Binance (' + chain + ')');
 
-        if (data.gate_deposit === 'NO' && data.gate_withdraw === 'Yes') {
-          d1w1ExchangeMap[token].add('Gate');
-        } else if (previousD1W1Chains[token + '_GATE_' + chain]) {
-          brokenD1W1Targets[token].push('Gate (' + chain + ')');
-        }
+        if (data.gate_deposit === 'NO' && data.gate_withdraw === 'Yes') d1w1ExchangeMap[token].add('Gate');
+        else if (previousD1W1Chains[token + '_GATE_' + chain]) brokenD1W1Targets[token].push('Gate (' + chain + ')');
 
         chainOutputRows.push([
           token, chain,
@@ -258,11 +469,8 @@ function runAllCryptoTrackers() {
       var mainnetStr = 'MAINNET';
       if (kcData.deposit === 'Yes' && kcData.withdraw === 'Yes') liveTokenExchangeMap[token].add('KuCoin');
 
-      if (kcData.deposit === 'NO' && kcData.withdraw === 'Yes') {
-        d1w1ExchangeMap[token].add('KuCoin');
-      } else if (previousD1W1Chains[token + '_KUCOIN_' + mainnetStr]) {
-        brokenD1W1Targets[token].push('KuCoin (' + mainnetStr + ')');
-      }
+      if (kcData.deposit === 'NO' && kcData.withdraw === 'Yes') d1w1ExchangeMap[token].add('KuCoin');
+      else if (previousD1W1Chains[token + '_KUCOIN_' + mainnetStr]) brokenD1W1Targets[token].push('KuCoin (' + mainnetStr + ')');
 
       chainOutputRows.push([token, mainnetStr, kcData.deposit, kcData.withdraw, 'NO', 'NO', 'NO', 'NO']);
     } else {
@@ -283,7 +491,7 @@ function runAllCryptoTrackers() {
 
   var summaryOutput = [];
   var incomingAlertsList = [];
-  var timestampString = Utilities.formatDate(new Date(), CONFIG.TIMEZONE || 'Asia/Kolkata', 'yyyy-MM-dd HH:mm');
+  var timestampString = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd HH:mm');
 
   sortedTokens.forEach(function (token) {
     if (!targetTokens.has(token)) return;
@@ -360,7 +568,24 @@ function runAllCryptoTrackers() {
 
     if (triggerEmail) {
       try {
-        sendDegradationEmail_(token, timestampString, alertSubject, alertBodyDetails);
+        var htmlBody =
+          '<div style="font-family: \'Courier New\', Courier, monospace; max-width: 650px; background-color: #0B1220; border: 2px solid #ff4d4d; padding: 20px; border-radius: 4px; color: #ffffff;">' +
+          '<h2 style="color: #ff4d4d; margin-top: 0; font-size: 20px; border-bottom: 1px solid #ff4d4d; padding-bottom: 10px; letter-spacing: 1px;">🚨 OPERATIONAL DEGRADATION ALERT</h2>' +
+          '<table style="width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 14px; color: #e2e8f0;">' +
+          '<tr style="border-bottom: 1px solid #1A202C;"><td style="padding: 10px 5px; color: #718096; width: 45%;">Date/Time Verified</td><td style="padding: 10px 5px; font-weight: bold; color: #38bdf8;">' + timestampString + '</td></tr>' +
+          '<tr style="border-bottom: 1px solid #1A202C;"><td style="padding: 10px 5px; color: #718096;">Token Symbol</td><td style="padding: 10px 5px; font-weight: bold; color: #fb923c;">' + token + '</td></tr>' +
+          alertBodyDetails +
+          '</table>' +
+          '<hr style="border: 0; border-top: 1px solid #1A202C; margin: 20px 0;">' +
+          '<p style="font-size: 11px; color: #4a5568; text-align: center; margin-bottom: 0;">Automated Transmission // CoinDCX Operations Command Center Tracking Engine</p>' +
+          '</div>';
+
+        MailApp.sendEmail({
+          to: CONFIG.ALERT_RECIPIENTS.join(','),
+          subject: alertSubject,
+          htmlBody: htmlBody,
+          name: 'Token Health Chain Metrix'
+        });
       } catch (mailErr) {
         Logger.log('❌ Mail send failed for ' + token + ': ' + mailErr);
       }
@@ -374,6 +599,135 @@ function runAllCryptoTrackers() {
   // =========================================================
   // PHASE 8: COMMIT STRUCTURAL ANOMALIES TO "ALERTS" TAB
   // =========================================================
-  appendAlerts_(alertsSheet, incomingAlertsList);
+  if (alertsSheet.getLastRow() === 0) {
+    alertsSheet.appendRow([
+      'Date/Time Verified', 'Token Symbol', 'Previous Count', 'Current Count', 'Detailed Status Alert Message'
+    ]);
+    alertsSheet.getRange('A1:E1').setFontWeight('bold');
+  }
+
+  if (incomingAlertsList.length > 0) {
+    alertsSheet.getRange(alertsSheet.getLastRow() + 1, 1, incomingAlertsList.length, 5).setValues(incomingAlertsList);
+  }
+
   Logger.log('✅ runAllCryptoTrackers finished.');
+}
+
+// =========================================================
+// BINANCE TICKER HELPERS
+// =========================================================
+
+function fetchBinanceTickersReliable_() {
+  var volMap = {};
+  var listedSet = new Set();
+  var urls = CONFIG.BINANCE_TICKER_URLS;
+  var maxAttempts = CONFIG.BINANCE_MAX_ATTEMPTS || 3;
+  var sleepMs = CONFIG.BINANCE_RETRY_SLEEP_MS || 400;
+  var lastError = '';
+
+  for (var attempt = 0; attempt < maxAttempts; attempt++) {
+    var url = urls[attempt % urls.length];
+    try {
+      Logger.log('Binance ticker attempt ' + (attempt + 1) + '/' + maxAttempts + ' → ' + url);
+      var response = UrlFetchApp.fetch(url, {
+        method: 'get',
+        muteHttpExceptions: true,
+        followRedirects: true
+      });
+
+      var code = response.getResponseCode();
+      var text = response.getContentText() || '';
+
+      if (code !== 200) {
+        lastError = 'HTTP ' + code + ' from ' + url + ' (body preview: ' + text.substring(0, 160) + ')';
+        Logger.log('❌ ' + lastError);
+        Utilities.sleep(sleepMs * (attempt + 1));
+        continue;
+      }
+
+      if (!text || text.charAt(0) !== '[') {
+        lastError = 'Unexpected Binance ticker body (not a JSON array) from ' + url +
+          ' (preview: ' + text.substring(0, 160) + ')';
+        Logger.log('❌ ' + lastError);
+        Utilities.sleep(sleepMs * (attempt + 1));
+        continue;
+      }
+
+      var parsed = JSON.parse(text);
+      if (!Array.isArray(parsed) || parsed.length === 0) {
+        lastError = 'Binance ticker JSON empty/non-array from ' + url;
+        Logger.log('❌ ' + lastError);
+        Utilities.sleep(sleepMs * (attempt + 1));
+        continue;
+      }
+
+      var result = parseBinanceTickerArray_(parsed);
+      if (result.listedCount === 0) {
+        lastError = 'Parsed 0 listed symbols from ' + url;
+        Logger.log('❌ ' + lastError);
+        Utilities.sleep(sleepMs * (attempt + 1));
+        continue;
+      }
+
+      Logger.log('✅ Binance ticker OK via ' + url +
+        ' — listed=' + result.listedCount + ', usdtVolumes=' + result.usdtVolumeCount);
+      return { ok: true, volMap: result.volMap, listedSet: result.listedSet, error: '' };
+    } catch (e) {
+      lastError = 'Exception on ' + url + ': ' + (e && e.message ? e.message : e);
+      Logger.log('❌ ' + lastError);
+      Utilities.sleep(sleepMs * (attempt + 1));
+    }
+  }
+
+  Logger.log('❌ Binance ticker exhausted all retries. Last error: ' + lastError);
+  return { ok: false, volMap: volMap, listedSet: listedSet, error: lastError };
+}
+
+function parseBinanceTickerArray_(tickers) {
+  var volMap = {};
+  var listedSet = new Set();
+  var usdtVolumeCount = 0;
+  var quotePriority = ['USDT', 'USDC', 'FDUSD', 'BUSD', 'TUSD', 'BTC'];
+
+  tickers.forEach(function (x) {
+    if (!x || !x.symbol) return;
+    var symbol = String(x.symbol).toUpperCase();
+    var match = symbol.match(/^(.+)(USDT|USDC|FDUSD|BUSD|TUSD|BTC)$/);
+    if (!match) return;
+
+    var base = match[1];
+    var quote = match[2];
+    if (!base) return;
+
+    listedSet.add(base);
+
+    var quoteVol = parseFloat(x.quoteVolume);
+    if (isNaN(quoteVol)) quoteVol = 0;
+
+    var existing = volMap[base];
+    if (!existing) {
+      volMap[base] = { volume: quoteVol, quote: quote };
+      if (quote === 'USDT' && quoteVol > 0) usdtVolumeCount++;
+      return;
+    }
+
+    var prevIdx = quotePriority.indexOf(existing.quote);
+    var nextIdx = quotePriority.indexOf(quote);
+    if (nextIdx !== -1 && (prevIdx === -1 || nextIdx < prevIdx)) {
+      volMap[base] = { volume: quoteVol, quote: quote };
+      if (quote === 'USDT' && quoteVol > 0) usdtVolumeCount++;
+    }
+  });
+
+  var flatVol = {};
+  Object.keys(volMap).forEach(function (tok) {
+    flatVol[tok] = volMap[tok].volume || 0;
+  });
+
+  return {
+    volMap: flatVol,
+    listedSet: listedSet,
+    listedCount: listedSet.size,
+    usdtVolumeCount: usdtVolumeCount
+  };
 }
