@@ -6,10 +6,14 @@
  * - Retries across multiple hosts with HTTP/JSON validation
  * - Preserves previous HEALTH Binance volumes if live ticker pull fails
  *   (avoids wiping good data to 0 on flaky responses)
+ *
+ * Alerts: at most 2 emails per run
+ * - Email 1: all exchange coverage drops (combined table)
+ * - Email 2: all D1W1 changes (combined table)
  */
 
 var CONFIG = {
-  CMC_API_KEY: '', // prefer Script Property CMC_API_KEY via setCmcApiKey()
+  CMC_API_KEY: 'd90ea812cc994bf4bfa11c7c2c7bebc7', // prefer Script Property CMC_API_KEY via setCmcApiKey()
   CMC_CHUNK_SIZE: 60,
   CMC_SLEEP_MS: 100,
   TIMEZONE: 'Asia/Kolkata',
@@ -43,7 +47,8 @@ var CONFIG = {
     'obaid.rehman@coindcx.com',
     'ronak.keny@coindcx.com',
     'sujay.patil@coindcx.com',
-    'therese.joseph@coindcx.com'
+    'therese.joseph@coindcx.com',
+    'pratik.gothankar@coindcx.com'
   ]
 };
 
@@ -485,12 +490,15 @@ function runAllCryptoTrackers() {
   }
 
   // =========================================================
-  // PHASE 7: HEADER CALCULATIONS & EXCLUSION ANOMALIES
+  // PHASE 7: HEADER CALCULATIONS & BATCHED EMAIL ALERTS
+  // At most 2 emails: (1) coverage drops  (2) D1W1 changes
   // =========================================================
   chainSheet.getRange('J1:M1').setValues([['token', 'D1W1 exchange', 'Exchange no', 'D1W1']]).setFontWeight('bold');
 
   var summaryOutput = [];
   var incomingAlertsList = [];
+  var coverageAlertRows = []; // batched email #1
+  var d1w1AlertRows = [];     // batched email #2
   var timestampString = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd HH:mm');
 
   sortedTokens.forEach(function (token) {
@@ -506,24 +514,19 @@ function runAllCryptoTrackers() {
 
     summaryOutput.push([token, liveExchangeList || '', liveCount, d1w1List || '']);
 
-    var triggerEmail = false;
-    var alertSubject = '';
-    var alertBodyDetails = '';
-
     if (previousExchangeCounts.hasOwnProperty(token)) {
       var pastCount = previousExchangeCounts[token];
       if (liveCount < pastCount) {
         var alertString = 'Token [' + token + '] coverage degraded from ' + pastCount +
           ' to ' + liveCount + '. Live Active: (' + (liveExchangeList || 'None') + ')';
         incomingAlertsList.push([timestampString, token, pastCount, liveCount, alertString]);
-
-        triggerEmail = true;
-        alertSubject = '🚨 CRITICAL: [' + token + '] Coverage Degraded';
-        alertBodyDetails =
-          '<tr style="border-bottom: 1px solid #1A202C;"><td style="padding: 10px 5px; color: #718096;">Metric Category</td><td style="padding: 10px 5px; font-weight: bold; color: #ff4d4d;">TOTAL EXCHANGE COVERAGE DROP</td></tr>' +
-          '<tr style="border-bottom: 1px solid #1A202C;"><td style="padding: 10px 5px; color: #718096;">Previous Count</td><td style="padding: 10px 5px; font-weight: bold; color: #a855f7;">' + pastCount + '</td></tr>' +
-          '<tr style="border-bottom: 1px solid #1A202C;"><td style="padding: 10px 5px; color: #718096;">Current Count</td><td style="padding: 10px 5px; font-weight: bold; color: #ff4d4d;">' + liveCount + '</td></tr>' +
-          '<tr><td style="padding: 10px 5px; color: #718096; vertical-align: top;">Alert Message</td><td style="padding: 10px 5px; color: #fecdd3; background-color: #1f1315; border-left: 3px solid #ff4d4d; padding-left: 10px; line-height: 1.4;">' + alertString + '</td></tr>';
+        coverageAlertRows.push({
+          token: token,
+          pastCount: pastCount,
+          liveCount: liveCount,
+          liveExchangeList: liveExchangeList || 'None',
+          message: alertString
+        });
       }
     }
 
@@ -532,68 +535,46 @@ function runAllCryptoTrackers() {
 
       if (liveD1w1Count !== pastD1w1Count) {
         var d1AlertString = '';
+        var direction = '';
+        var targetString = '';
 
         if (liveD1w1Count < pastD1w1Count) {
-          var targetString = brokenD1W1Targets[token].length > 0 ? brokenD1W1Targets[token].join(', ') : 'Unknown';
+          direction = 'DROP';
+          targetString = brokenD1W1Targets[token].length > 0 ? brokenD1W1Targets[token].join(', ') : 'Unknown';
           d1AlertString = 'Token [' + token + '] (D1W1) dropped from ' + pastD1w1Count +
             ' to ' + liveD1w1Count + '. Disabled D1W1 Status ' + targetString +
             '. Current D1W1 Exchanges left active: (' + (d1w1List || 'None') + ')';
-
-          triggerEmail = true;
-          alertSubject = '🚨 NOTICE: [' + token + '] D1W1 Status Degraded';
-          alertBodyDetails =
-            '<tr style="border-bottom: 1px solid #1A202C;"><td style="padding: 10px 5px; color: #718096;">Metric Category</td><td style="padding: 10px 5px; font-weight: bold; color: #fb923c;">D1W1 ASYMMETRIC WALLET DROP</td></tr>' +
-            '<tr style="border-bottom: 1px solid #1A202C;"><td style="padding: 10px 5px; color: #718096;">Degradation Target</td><td style="padding: 10px 5px; font-weight: bold; color: #f43f5e;">' + targetString + '</td></tr>' +
-            '<tr style="border-bottom: 1px solid #1A202C;"><td style="padding: 10px 5px; color: #718096;">Previous D1W1 Count</td><td style="padding: 10px 5px; font-weight: bold; color: #a855f7;">' + pastD1w1Count + '</td></tr>' +
-            '<tr style="border-bottom: 1px solid #1A202C;"><td style="padding: 10px 5px; color: #718096;">Current D1W1 Count</td><td style="padding: 10px 5px; font-weight: bold; color: #ff4d4d;">' + liveD1w1Count + '</td></tr>' +
-            '<tr><td style="padding: 10px 5px; color: #718096; vertical-align: top;">Alert Message</td><td style="padding: 10px 5px; color: #fecdd3; background-color: #1f1315; border-left: 3px solid #fb923c; padding-left: 10px; line-height: 1.4;">' + d1AlertString + '</td></tr>';
         } else {
+          direction = 'INCREASE';
+          targetString = d1w1List || 'None';
           d1AlertString = 'Token [' + token + '] (D1W1) increased from ' + pastD1w1Count +
             ' to ' + liveD1w1Count + '. New D1W1 Active Status verified. Current D1W1 Exchanges: (' +
             (d1w1List || 'None') + ')';
-
-          triggerEmail = true;
-          alertSubject = '🟢 NOTICE: [' + token + '] D1W1 Status Increased';
-          alertBodyDetails =
-            '<tr style="border-bottom: 1px solid #1A202C;"><td style="padding: 10px 5px; color: #718096;">Metric Category</td><td style="padding: 10px 5px; font-weight: bold; color: #10b981;">D1W1 ASYMMETRIC WALLET INCREASE</td></tr>' +
-            '<tr style="border-bottom: 1px solid #1A202C;"><td style="padding: 10px 5px; color: #718096;">Active Environments</td><td style="padding: 10px 5px; font-weight: bold; color: #34d399;">(' + (d1w1List || 'None') + ')</td></tr>' +
-            '<tr style="border-bottom: 1px solid #1A202C;"><td style="padding: 10px 5px; color: #718096;">Previous D1W1 Count</td><td style="padding: 10px 5px; font-weight: bold; color: #a855f7;">' + pastD1w1Count + '</td></tr>' +
-            '<tr style="border-bottom: 1px solid #1A202C;"><td style="padding: 10px 5px; color: #718096;">Current D1W1 Count</td><td style="padding: 10px 5px; font-weight: bold; color: #10b981;">' + liveD1w1Count + '</td></tr>' +
-            '<tr><td style="padding: 10px 5px; color: #718096; vertical-align: top;">Alert Message</td><td style="padding: 10px 5px; color: #e6f4ea; background-color: #0f1c14; border-left: 3px solid #10b981; padding-left: 10px; line-height: 1.4;">' + d1AlertString + '</td></tr>';
         }
 
         incomingAlertsList.push([timestampString, token, pastD1w1Count, liveD1w1Count, d1AlertString]);
-      }
-    }
-
-    if (triggerEmail) {
-      try {
-        var htmlBody =
-          '<div style="font-family: \'Courier New\', Courier, monospace; max-width: 650px; background-color: #0B1220; border: 2px solid #ff4d4d; padding: 20px; border-radius: 4px; color: #ffffff;">' +
-          '<h2 style="color: #ff4d4d; margin-top: 0; font-size: 20px; border-bottom: 1px solid #ff4d4d; padding-bottom: 10px; letter-spacing: 1px;">🚨 OPERATIONAL DEGRADATION ALERT</h2>' +
-          '<table style="width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 14px; color: #e2e8f0;">' +
-          '<tr style="border-bottom: 1px solid #1A202C;"><td style="padding: 10px 5px; color: #718096; width: 45%;">Date/Time Verified</td><td style="padding: 10px 5px; font-weight: bold; color: #38bdf8;">' + timestampString + '</td></tr>' +
-          '<tr style="border-bottom: 1px solid #1A202C;"><td style="padding: 10px 5px; color: #718096;">Token Symbol</td><td style="padding: 10px 5px; font-weight: bold; color: #fb923c;">' + token + '</td></tr>' +
-          alertBodyDetails +
-          '</table>' +
-          '<hr style="border: 0; border-top: 1px solid #1A202C; margin: 20px 0;">' +
-          '<p style="font-size: 11px; color: #4a5568; text-align: center; margin-bottom: 0;">Automated Transmission // CoinDCX Operations Command Center Tracking Engine</p>' +
-          '</div>';
-
-        MailApp.sendEmail({
-          to: CONFIG.ALERT_RECIPIENTS.join(','),
-          subject: alertSubject,
-          htmlBody: htmlBody,
-          name: 'Token Health Chain Metrix'
+        d1w1AlertRows.push({
+          token: token,
+          direction: direction,
+          pastCount: pastD1w1Count,
+          liveCount: liveD1w1Count,
+          targetString: targetString,
+          message: d1AlertString
         });
-      } catch (mailErr) {
-        Logger.log('❌ Mail send failed for ' + token + ': ' + mailErr);
       }
     }
   });
 
   if (summaryOutput.length > 0) {
     chainSheet.getRange(2, 10, summaryOutput.length, 4).setValues(summaryOutput);
+  }
+
+  // Send at most 2 combined emails (not one per token)
+  if (coverageAlertRows.length > 0) {
+    sendBatchedCoverageEmail_(timestampString, coverageAlertRows);
+  }
+  if (d1w1AlertRows.length > 0) {
+    sendBatchedD1W1Email_(timestampString, d1w1AlertRows);
   }
 
   // =========================================================
@@ -611,6 +592,114 @@ function runAllCryptoTrackers() {
   }
 
   Logger.log('✅ runAllCryptoTrackers finished.');
+}
+
+// =========================================================
+// BATCHED EMAIL HELPERS (max 2 emails per run)
+// =========================================================
+
+function sendBatchedCoverageEmail_(timestampString, rows) {
+  var tokenList = rows.map(function (r) { return r.token; }).join(', ');
+  var tableRows = '';
+
+  rows.forEach(function (r, idx) {
+    tableRows +=
+      '<tr style="background-color:' + (idx % 2 === 0 ? '#111827' : '#0B1220') + ';">' +
+      '<td style="padding: 10px 8px; border-bottom: 1px solid #1A202C; font-weight: bold; color: #fb923c;">' + r.token + '</td>' +
+      '<td style="padding: 10px 8px; border-bottom: 1px solid #1A202C; color: #a855f7; text-align: center;">' + r.pastCount + '</td>' +
+      '<td style="padding: 10px 8px; border-bottom: 1px solid #1A202C; color: #ff4d4d; text-align: center; font-weight: bold;">' + r.liveCount + '</td>' +
+      '<td style="padding: 10px 8px; border-bottom: 1px solid #1A202C; color: #e2e8f0;">' + r.liveExchangeList + '</td>' +
+      '<td style="padding: 10px 8px; border-bottom: 1px solid #1A202C; color: #fecdd3; font-size: 12px;">' + r.message + '</td>' +
+      '</tr>';
+  });
+
+  var htmlBody =
+    '<div style="font-family: \'Courier New\', Courier, monospace; max-width: 900px; background-color: #0B1220; border: 2px solid #ff4d4d; padding: 20px; border-radius: 4px; color: #ffffff;">' +
+    '<h2 style="color: #ff4d4d; margin-top: 0; font-size: 20px; border-bottom: 1px solid #ff4d4d; padding-bottom: 10px; letter-spacing: 1px;">🚨 COVERAGE DEGRADATION ALERT (' + rows.length + ' token' + (rows.length > 1 ? 's' : '') + ')</h2>' +
+    '<p style="color: #94a3b8; font-size: 13px; margin: 8px 0 16px;">Date/Time Verified: <span style="color:#38bdf8;font-weight:bold;">' + timestampString + '</span></p>' +
+    '<table style="width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; color: #e2e8f0;">' +
+    '<thead><tr style="background-color:#1A202C;">' +
+    '<th style="padding: 10px 8px; text-align: left; color: #94a3b8;">Token</th>' +
+    '<th style="padding: 10px 8px; text-align: center; color: #94a3b8;">Prev</th>' +
+    '<th style="padding: 10px 8px; text-align: center; color: #94a3b8;">Curr</th>' +
+    '<th style="padding: 10px 8px; text-align: left; color: #94a3b8;">Live Active</th>' +
+    '<th style="padding: 10px 8px; text-align: left; color: #94a3b8;">Details</th>' +
+    '</tr></thead><tbody>' + tableRows + '</tbody></table>' +
+    '<hr style="border: 0; border-top: 1px solid #1A202C; margin: 20px 0;">' +
+    '<p style="font-size: 11px; color: #4a5568; text-align: center; margin-bottom: 0;">Automated Transmission // CoinDCX Operations Command Center Tracking Engine</p>' +
+    '</div>';
+
+  try {
+    MailApp.sendEmail({
+      to: CONFIG.ALERT_RECIPIENTS.join(','),
+      subject: '🚨 CRITICAL: Coverage Degraded — ' + rows.length + ' token' + (rows.length > 1 ? 's' : '') + ' [' + tokenList + ']',
+      htmlBody: htmlBody,
+      name: 'Token Health Chain Metrix'
+    });
+    Logger.log('📧 Sent batched coverage email for ' + rows.length + ' token(s).');
+  } catch (mailErr) {
+    Logger.log('❌ Batched coverage mail failed: ' + mailErr);
+  }
+}
+
+function sendBatchedD1W1Email_(timestampString, rows) {
+  var tokenList = rows.map(function (r) { return r.token; }).join(', ');
+  var dropCount = 0;
+  var increaseCount = 0;
+  var tableRows = '';
+
+  rows.forEach(function (r, idx) {
+    if (r.direction === 'DROP') dropCount++;
+    else increaseCount++;
+
+    var dirColor = r.direction === 'DROP' ? '#fb923c' : '#10b981';
+    var msgColor = r.direction === 'DROP' ? '#fecdd3' : '#e6f4ea';
+
+    tableRows +=
+      '<tr style="background-color:' + (idx % 2 === 0 ? '#111827' : '#0B1220') + ';">' +
+      '<td style="padding: 10px 8px; border-bottom: 1px solid #1A202C; font-weight: bold; color: #fb923c;">' + r.token + '</td>' +
+      '<td style="padding: 10px 8px; border-bottom: 1px solid #1A202C; color: ' + dirColor + '; font-weight: bold; text-align: center;">' + r.direction + '</td>' +
+      '<td style="padding: 10px 8px; border-bottom: 1px solid #1A202C; color: #a855f7; text-align: center;">' + r.pastCount + '</td>' +
+      '<td style="padding: 10px 8px; border-bottom: 1px solid #1A202C; color: ' + dirColor + '; text-align: center; font-weight: bold;">' + r.liveCount + '</td>' +
+      '<td style="padding: 10px 8px; border-bottom: 1px solid #1A202C; color: #e2e8f0;">' + r.targetString + '</td>' +
+      '<td style="padding: 10px 8px; border-bottom: 1px solid #1A202C; color: ' + msgColor + '; font-size: 12px;">' + r.message + '</td>' +
+      '</tr>';
+  });
+
+  var borderColor = dropCount > 0 ? '#fb923c' : '#10b981';
+  var titleColor = dropCount > 0 ? '#fb923c' : '#10b981';
+
+  var htmlBody =
+    '<div style="font-family: \'Courier New\', Courier, monospace; max-width: 950px; background-color: #0B1220; border: 2px solid ' + borderColor + '; padding: 20px; border-radius: 4px; color: #ffffff;">' +
+    '<h2 style="color: ' + titleColor + '; margin-top: 0; font-size: 20px; border-bottom: 1px solid ' + borderColor + '; padding-bottom: 10px; letter-spacing: 1px;">📡 D1W1 STATUS CHANGES (' + rows.length + ' token' + (rows.length > 1 ? 's' : '') + ')</h2>' +
+    '<p style="color: #94a3b8; font-size: 13px; margin: 8px 0 16px;">Date/Time Verified: <span style="color:#38bdf8;font-weight:bold;">' + timestampString + '</span>' +
+    ' &nbsp;|&nbsp; Drops: <span style="color:#fb923c;font-weight:bold;">' + dropCount + '</span>' +
+    ' &nbsp;|&nbsp; Increases: <span style="color:#10b981;font-weight:bold;">' + increaseCount + '</span></p>' +
+    '<table style="width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; color: #e2e8f0;">' +
+    '<thead><tr style="background-color:#1A202C;">' +
+    '<th style="padding: 10px 8px; text-align: left; color: #94a3b8;">Token</th>' +
+    '<th style="padding: 10px 8px; text-align: center; color: #94a3b8;">Direction</th>' +
+    '<th style="padding: 10px 8px; text-align: center; color: #94a3b8;">Prev</th>' +
+    '<th style="padding: 10px 8px; text-align: center; color: #94a3b8;">Curr</th>' +
+    '<th style="padding: 10px 8px; text-align: left; color: #94a3b8;">Target / Active</th>' +
+    '<th style="padding: 10px 8px; text-align: left; color: #94a3b8;">Details</th>' +
+    '</tr></thead><tbody>' + tableRows + '</tbody></table>' +
+    '<hr style="border: 0; border-top: 1px solid #1A202C; margin: 20px 0;">' +
+    '<p style="font-size: 11px; color: #4a5568; text-align: center; margin-bottom: 0;">Automated Transmission // CoinDCX Operations Command Center Tracking Engine</p>' +
+    '</div>';
+
+  var subjectPrefix = dropCount > 0 ? '🚨 NOTICE' : '🟢 NOTICE';
+  try {
+    MailApp.sendEmail({
+      to: CONFIG.ALERT_RECIPIENTS.join(','),
+      subject: subjectPrefix + ': D1W1 Status Changes — ' + rows.length + ' token' + (rows.length > 1 ? 's' : '') + ' [' + tokenList + ']',
+      htmlBody: htmlBody,
+      name: 'Token Health Chain Metrix'
+    });
+    Logger.log('📧 Sent batched D1W1 email for ' + rows.length + ' token(s).');
+  } catch (mailErr) {
+    Logger.log('❌ Batched D1W1 mail failed: ' + mailErr);
+  }
 }
 
 // =========================================================
