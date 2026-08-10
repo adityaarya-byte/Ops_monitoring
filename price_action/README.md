@@ -8,27 +8,26 @@ Single-file Google Apps Script (`Code.gs`).
 |-----|---------|
 | `HEALTH` | Token inputs + price/volume/listing |
 | `CHAIN` | Per-chain deposit/withdraw matrix |
-| `ALERTS` | Withdrawal-off history (with Binance reason) |
+| `ALERTS` | Withdrawal OFF / ON history |
 | `Monitoring` | Flattened monitoring export |
 
-## Alerts (new format)
+## Alerts
 
-Triggers only when withdrawal goes **Yes → NO** for a monitored token/chain:
+| Transition | Event logged | Email |
+|------------|--------------|-------|
+| Yes → NO | `Withdrawal OFF` | Binance (with red reason) or KuCoin/Gate |
+| NO → Yes | `Withdrawal ON` | Resumed digest (all exchanges) |
 
-1. **Email 1 — Binance**  
-   Includes `withdrawDesc` in **red**, tagged `TEMPORARY` / `PERMANENT` / `UNKNOWN`.
+Example ALERTS rows:
 
-2. **Email 2 — KuCoin + Gate**  
-   State-only (APIs do not provide a reason).
-
-Coverage / D1W1 email alerts are removed. Live exchange summary still writes to CHAIN columns J–L.
+```
+2026-08-09 5:27   RVN  Binance  RVN  Withdrawal OFF  TEMPORARY  The wallet is currently undergoing maintenance...
+2026-08-09 8:10   RVN  Binance  RVN  Withdrawal ON   RESTORED   Binance has turned withdrawals back ON for RVN on RVN...
+```
 
 ## Setup
 
-1. Paste `Code.gs` into Apps Script bound to the sheet.
+1. Paste `Code.gs` into Apps Script.
 2. Ensure tabs `HEALTH`, `CHAIN`, `ALERTS`, `Monitoring` exist.
-3. Trigger `runAllCryptoTrackers` on a schedule.
-
-## Note
-
-Local only for now — not pushed to GitHub until approved.
+3. Keep CMC key in `CONFIG.CMC_API_KEY` (or Script Property `CMC_API_KEY`).
+4. Trigger `runAllCryptoTrackers` on a schedule.

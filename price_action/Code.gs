@@ -3,13 +3,15 @@
  * Sheets required: HEALTH, CHAIN, ALERTS, Monitoring
  *
  * Alerts (replaces previous coverage / D1W1 email format):
- * - When withdrawal turns OFF for a token on a chain
- * - Binance: include withdrawDesc (red), classify TEMPORARY / PERMANENT / UNKNOWN
+ * - When withdrawal turns OFF (Yes → NO) for a token on a chain
+ * - When withdrawal turns back ON (NO → Yes) after maintenance / pause
+ * - Binance OFF: include withdrawDesc (red), classify TEMPORARY / PERMANENT / UNKNOWN
  * - KuCoin / Gate: state-only (no reason from API)
  *
- * Delivery: at most 2 emails per run
+ * Delivery: up to 3 emails per run
  *   1) Binance withdrawal-off digest (with reasons)
  *   2) KuCoin + Gate withdrawal-off digest
+ *   3) Withdrawal-on / resumed digest (all exchanges)
  */
 
 var CONFIG = {
@@ -440,6 +442,7 @@ function runAllCryptoTrackers() {
 
   var binanceOffAlerts = [];
   var otherOffAlerts = [];
+  var onAlerts = []; // withdrawal resumed (NO → Yes)
   var incomingAlertsList = [];
   var timestampString = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd HH:mm');
 
@@ -464,21 +467,21 @@ function runAllCryptoTrackers() {
       if (data.binance_deposit === 'Yes' && data.binance_withdraw === 'Yes') liveTokenExchangeMap[token].add('Binance');
       if (data.gate_deposit === 'Yes' && data.gate_withdraw === 'Yes') liveTokenExchangeMap[token].add('Gate');
 
-      // --- Detect withdrawal OFF transitions ---
-      detectWithdrawOff_(
+      // --- Detect withdrawal OFF (Yes→NO) and ON (NO→Yes) transitions ---
+      detectWithdrawChange_(
         previousWithdrawState, token, 'BINANCE', chain,
         data.binance_withdraw, data.binance_withdraw_desc,
-        timestampString, binanceOffAlerts, otherOffAlerts, incomingAlertsList
+        timestampString, binanceOffAlerts, otherOffAlerts, onAlerts, incomingAlertsList
       );
-      detectWithdrawOff_(
+      detectWithdrawChange_(
         previousWithdrawState, token, 'KUCOIN', chain,
         data.kucoin_withdraw, '',
-        timestampString, binanceOffAlerts, otherOffAlerts, incomingAlertsList
+        timestampString, binanceOffAlerts, otherOffAlerts, onAlerts, incomingAlertsList
       );
-      detectWithdrawOff_(
+      detectWithdrawChange_(
         previousWithdrawState, token, 'GATE', chain,
         data.gate_withdraw, '',
-        timestampString, binanceOffAlerts, otherOffAlerts, incomingAlertsList
+        timestampString, binanceOffAlerts, otherOffAlerts, onAlerts, incomingAlertsList
       );
 
       chainOutputRows.push([
@@ -507,13 +510,16 @@ function runAllCryptoTrackers() {
   }
 
   // =========================================================
-  // PHASE 7: BATCHED WITHDRAWAL-OFF EMAILS (max 2)
+  // PHASE 7: BATCHED EMAILS (OFF + ON/resumed)
   // =========================================================
   if (binanceOffAlerts.length > 0) {
     sendBinanceWithdrawOffEmail_(timestampString, binanceOffAlerts);
   }
   if (otherOffAlerts.length > 0) {
     sendOtherExchangesWithdrawOffEmail_(timestampString, otherOffAlerts);
+  }
+  if (onAlerts.length > 0) {
+    sendWithdrawOnEmail_(timestampString, onAlerts);
   }
 
   // =========================================================
@@ -527,8 +533,9 @@ function runAllCryptoTrackers() {
   }
 
   Logger.log(
-    '✅ Done. Withdrawal-off alerts — Binance: ' + binanceOffAlerts.length +
-    ', KuCoin/Gate: ' + otherOffAlerts.length
+    '✅ Done. OFF — Binance: ' + binanceOffAlerts.length +
+    ', KuCoin/Gate: ' + otherOffAlerts.length +
+    ' | ON/resumed: ' + onAlerts.length
   );
 }
 
@@ -570,57 +577,80 @@ function classifyWithdrawReason_(desc) {
 }
 
 /**
- * Alert only on Yes → NO transition (skip first-seen / already-off).
+ * Alert on:
+ *   Yes → NO  = Withdrawal OFF
+ *   NO  → Yes = Withdrawal ON (resumed after maintenance / pause)
+ * Skip first-seen rows (no previous snapshot).
  */
-function detectWithdrawOff_(
+function detectWithdrawChange_(
   previousWithdrawState, token, exchange, chain,
   liveWithdraw, withdrawDesc,
-  timestampString, binanceOffAlerts, otherOffAlerts, incomingAlertsList
+  timestampString, binanceOffAlerts, otherOffAlerts, onAlerts, incomingAlertsList
 ) {
   var key = token + '|' + exchange + '|' + chain;
   var prev = previousWithdrawState[key]; // undefined = no prior snapshot
   var live = normalizeYesNo_(liveWithdraw);
+  if (!prev) return;
 
-  if (!prev) return;           // first run / new chain — no alert
-  if (prev !== 'Yes') return;  // was already off or unknown
-  if (live !== 'NO') return;   // still on
-
-  var reasonType = 'NONE';
-  var reasonText = '';
   var exchangeLabel = exchange === 'BINANCE' ? 'Binance' : (exchange === 'KUCOIN' ? 'KuCoin' : 'Gate');
 
-  if (exchange === 'BINANCE') {
-    reasonText = withdrawDesc ? String(withdrawDesc).trim() : '';
-    reasonType = classifyWithdrawReason_(reasonText);
-    if (!reasonText) reasonText = 'No reason provided by Binance.';
+  // ----- OFF: was Yes, now NO -----
+  if (prev === 'Yes' && live === 'NO') {
+    var reasonType = 'NONE';
+    var reasonText = '';
+
+    if (exchange === 'BINANCE') {
+      reasonText = withdrawDesc ? String(withdrawDesc).trim() : '';
+      reasonType = classifyWithdrawReason_(reasonText);
+      if (!reasonText) reasonText = 'No reason provided by Binance.';
+    }
+
+    var offObj = {
+      token: token,
+      exchange: exchangeLabel,
+      exchangeKey: exchange,
+      chain: chain,
+      reasonType: reasonType,
+      reasonText: reasonText,
+      message: buildWithdrawOffMessage_(exchangeLabel, token, chain, reasonType, reasonText)
+    };
+
+    if (exchange === 'BINANCE') binanceOffAlerts.push(offObj);
+    else otherOffAlerts.push(offObj);
+
+    incomingAlertsList.push([
+      timestampString, token, exchangeLabel, chain,
+      'Withdrawal OFF',
+      reasonType,
+      reasonText || (exchangeLabel + ' does not provide a reason.')
+    ]);
+    return;
   }
 
-  var alertObj = {
-    token: token,
-    exchange: exchangeLabel,
-    exchangeKey: exchange,
-    chain: chain,
-    reasonType: reasonType,
-    reasonText: reasonText,
-    message: buildWithdrawOffMessage_(exchangeLabel, token, chain, reasonType, reasonText)
-  };
+  // ----- ON: was NO, now Yes (e.g. maintenance completed) -----
+  if (prev === 'NO' && live === 'Yes') {
+    var onReasonType = 'RESTORED';
+    var onReasonText = exchangeLabel +
+      ' has turned withdrawals back ON for ' + token + ' on ' + chain +
+      '. Status restored (e.g. maintenance completed).';
 
-  if (exchange === 'BINANCE') {
-    binanceOffAlerts.push(alertObj);
-  } else {
-    otherOffAlerts.push(alertObj);
+    onAlerts.push({
+      token: token,
+      exchange: exchangeLabel,
+      exchangeKey: exchange,
+      chain: chain,
+      reasonType: onReasonType,
+      reasonText: onReasonText,
+      message: onReasonText
+    });
+
+    incomingAlertsList.push([
+      timestampString, token, exchangeLabel, chain,
+      'Withdrawal ON',
+      onReasonType,
+      onReasonText
+    ]);
   }
-
-  // ALERTS sheet row: Date | Token | Exchange | Chain | Event | Reason Type | Reason Text
-  incomingAlertsList.push([
-    timestampString,
-    token,
-    exchangeLabel,
-    chain,
-    'Withdrawal OFF',
-    reasonType,
-    reasonText || (exchangeLabel + ' does not provide a reason.')
-  ]);
 }
 
 function buildWithdrawOffMessage_(exchangeLabel, token, chain, reasonType, reasonText) {
@@ -767,6 +797,56 @@ function sendOtherExchangesWithdrawOffEmail_(timestampString, rows) {
     Logger.log('📧 KuCoin/Gate withdrawal-off email sent (' + rows.length + ').');
   } catch (e) {
     Logger.log('❌ KuCoin/Gate withdrawal-off email failed: ' + e);
+  }
+}
+
+function sendWithdrawOnEmail_(timestampString, rows) {
+  var tokenList = uniqueTokens_(rows).join(', ');
+  var tableRows = '';
+
+  rows.forEach(function (r, idx) {
+    var bg = idx % 2 === 0 ? '#111827' : '#0B1220';
+    tableRows +=
+      '<tr style="background-color:' + bg + ';">' +
+      '<td style="padding:10px 8px;border-bottom:1px solid #1A202C;font-weight:bold;color:#34d399;">' + r.token + '</td>' +
+      '<td style="padding:10px 8px;border-bottom:1px solid #1A202C;color:#38bdf8;">' + r.exchange + '</td>' +
+      '<td style="padding:10px 8px;border-bottom:1px solid #1A202C;color:#e2e8f0;">' + r.chain + '</td>' +
+      '<td style="padding:10px 8px;border-bottom:1px solid #1A202C;color:#e6f4ea;">' +
+      escapeHtml_(r.reasonText) + '</td>' +
+      '</tr>';
+  });
+
+  var htmlBody =
+    '<div style="font-family:\'Courier New\',Courier,monospace;max-width:900px;background-color:#0B1220;border:2px solid #10b981;padding:20px;border-radius:4px;color:#ffffff;">' +
+    '<h2 style="color:#10b981;margin-top:0;font-size:20px;border-bottom:1px solid #10b981;padding-bottom:10px;">' +
+    'Withdrawal Restored (ON) — ' + rows.length + ' alert' + (rows.length > 1 ? 's' : '') + '</h2>' +
+    '<p style="color:#94a3b8;font-size:13px;margin:8px 0 16px;">Verified: <span style="color:#38bdf8;font-weight:bold;">' +
+    timestampString + '</span></p>' +
+    '<p style="color:#cbd5e1;font-size:13px;margin:0 0 16px;">' +
+    'Withdrawals that were previously OFF are now ON again (e.g. maintenance completed).' +
+    '</p>' +
+    '<table style="width:100%;border-collapse:collapse;font-size:13px;color:#e2e8f0;">' +
+    '<thead><tr style="background-color:#1A202C;">' +
+    '<th style="padding:10px 8px;text-align:left;color:#94a3b8;">Token</th>' +
+    '<th style="padding:10px 8px;text-align:left;color:#94a3b8;">Exchange</th>' +
+    '<th style="padding:10px 8px;text-align:left;color:#94a3b8;">Chain</th>' +
+    '<th style="padding:10px 8px;text-align:left;color:#94a3b8;">Message</th>' +
+    '</tr></thead><tbody>' + tableRows + '</tbody></table>' +
+    '<hr style="border:0;border-top:1px solid #1A202C;margin:20px 0;">' +
+    '<p style="font-size:11px;color:#4a5568;text-align:center;margin:0;">CoinDCX Operations // Token Health</p>' +
+    '</div>';
+
+  try {
+    MailApp.sendEmail({
+      to: CONFIG.ALERT_RECIPIENTS.join(','),
+      subject: 'Withdrawal ON / resumed — ' + rows.length + ' token/chain' +
+        (rows.length > 1 ? 's' : '') + ' [' + tokenList + ']',
+      htmlBody: htmlBody,
+      name: 'Token Health Chain Metrix'
+    });
+    Logger.log('📧 Withdrawal-on email sent (' + rows.length + ').');
+  } catch (e) {
+    Logger.log('❌ Withdrawal-on email failed: ' + e);
   }
 }
 
