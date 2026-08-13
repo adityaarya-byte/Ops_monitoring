@@ -61,10 +61,37 @@ const CONFIG = {
 };
 
 const SEVERITY_COLOR = {
-  NONE: '#34A853',
+  NONE: '#188038',
   AMBER: '#F9AB00',
   RED: '#D93025',
   BLACK: '#202124'
+};
+
+const SEVERITY_THEME = {
+  NONE: {
+    badge: 'CLEARED',
+    color: '#188038',
+    text: '#FFFFFF',
+    meaning: 'Q37 is at or below 3.5mm. Gold OI > 20x bad debt is no longer in an alert band.'
+  },
+  AMBER: {
+    badge: 'AMBER ALERT',
+    color: '#F9AB00',
+    text: '#3D2E00',
+    meaning: 'Q37 is greater than 3.5mm and has not crossed 4.0mm (Red).'
+  },
+  RED: {
+    badge: 'RED ALERT',
+    color: '#D93025',
+    text: '#FFFFFF',
+    meaning: 'Q37 is greater than 4.0mm and has not crossed 5.5mm (Black).'
+  },
+  BLACK: {
+    badge: 'BLACK ALERT',
+    color: '#202124',
+    text: '#F9AB00',
+    meaning: 'Q37 is greater than 5.5mm. Highest Gold OI > 20x bad-debt band.'
+  }
 };
 
 const PROP_LAST_HOUR = 'Q37_LAST_CHECK_HOUR';
@@ -98,6 +125,22 @@ function dryRunCheck() {
   const result = runCheck_({ force: true, dryRun: true, alwaysNotify: true });
   Logger.log(JSON.stringify(result, null, 2));
   return result;
+}
+
+/**
+ * Sends four labelled SAMPLE emails (Amber / Red / Black / Cleared) using
+ * example Q37 values so you can see color + format in Gmail. Does not read
+ * the live sheet.
+ */
+function sendSampleAlertEmails() {
+  const samples = getSamplePayloads_();
+  for (let i = 0; i < samples.length; i++) {
+    sendEmailAlert_(samples[i]);
+  }
+  Logger.log('Sent ' + samples.length + ' sample alert emails.');
+  return samples.map(function (p) {
+    return { severity: p.severity, subject: buildAlertSubject(p.severity, p.formattedValue, p.sample) };
+  });
 }
 
 /**
@@ -222,7 +265,7 @@ function sendEmailAlert_(payload) {
     return;
   }
 
-  const subject = buildAlertSubject(payload.severity, payload.formattedValue);
+  const subject = buildAlertSubject(payload.severity, payload.formattedValue, payload.sample);
   const htmlBody = buildEmailHtml_(payload);
   const options = {
     to: to.join(','),
@@ -250,7 +293,7 @@ function sendSlackAlert_(payload) {
     : payload.severity + ' — Gold OI > 20x (Bad Debt)';
 
   const body = {
-    text: buildAlertSubject(payload.severity, payload.formattedValue),
+    text: buildAlertSubject(payload.severity, payload.formattedValue, payload.sample),
     attachments: [{
       color: color,
       title: title,
@@ -271,45 +314,70 @@ function sendSlackAlert_(payload) {
 }
 
 function buildEmailHtml_(payload) {
-  const color = SEVERITY_COLOR[payload.severity] || SEVERITY_COLOR.AMBER;
-  const badge = payload.severity === 'NONE' ? 'CLEARED' : payload.severity;
+  const theme = SEVERITY_THEME[payload.severity] || SEVERITY_THEME.AMBER;
   const change = payload.previousSeverity && payload.previousSeverity !== payload.severity
-    ? escapeHtml_(payload.previousSeverity) + ' → ' + escapeHtml_(payload.severity)
-    : escapeHtml_(payload.severity);
+    ? payload.previousSeverity + ' → ' + (payload.severity === 'NONE' ? 'CLEARED' : payload.severity)
+    : (payload.severity === 'NONE' ? 'CLEARED' : payload.severity);
+  const bands = [
+    { id: 'NONE', label: 'OK', condition: '≤ 3.5mm', color: '#188038' },
+    { id: 'AMBER', label: 'AMBER', condition: '> 3.5mm', color: '#F9AB00' },
+    { id: 'RED', label: 'RED', condition: '> 4.0mm', color: '#D93025' },
+    { id: 'BLACK', label: 'BLACK', condition: '> 5.5mm', color: '#202124' }
+  ];
+
+  let ladder = '';
+  for (let i = 0; i < bands.length; i++) {
+    const b = bands[i];
+    const active = b.id === payload.severity;
+    const bg = active ? b.color : '#F8F9FA';
+    const fg = active ? (b.id === 'AMBER' ? '#3D2E00' : '#FFFFFF') : '#3C4043';
+    const mark = active ? ' ← current' : '';
+    ladder +=
+      '<tr>' +
+        '<td style="padding:8px 10px;background:' + bg + ';color:' + fg + ';font-weight:' + (active ? 'bold' : 'normal') + ';border-bottom:1px solid #E8EAED;width:88px">' +
+          escapeHtml_(b.label) +
+        '</td>' +
+        '<td style="padding:8px 10px;background:' + bg + ';color:' + fg + ';border-bottom:1px solid #E8EAED">' +
+          escapeHtml_(b.condition) + escapeHtml_(mark) +
+        '</td>' +
+      '</tr>';
+  }
 
   return (
-    '<div style="font-family:Arial,sans-serif;max-width:640px">' +
-      '<div style="background:' + color + ';color:#fff;padding:12px 16px;border-radius:6px 6px 0 0">' +
-        '<strong style="font-size:16px">' + escapeHtml_(badge) + '</strong>' +
-        '<div style="opacity:0.9;font-size:13px;margin-top:4px">' +
-          escapeHtml_(payload.metricLabel) +
-        '</div>' +
-      '</div>' +
-      '<div style="border:1px solid #e0e0e0;border-top:0;padding:16px;border-radius:0 0 6px 6px">' +
-        '<p style="margin:0 0 12px;font-size:22px;font-weight:bold">' +
-          escapeHtml_(payload.formattedValue) +
-        '</p>' +
-        '<table style="border-collapse:collapse;font-size:14px">' +
-          rowHtml_('Cell', payload.sheetName + '!' + payload.cell) +
+    '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;font-family:Arial,Helvetica,sans-serif;border-collapse:collapse">' +
+      '<tr><td style="background:' + theme.color + ';color:' + theme.text + ';padding:20px 24px">' +
+        '<div style="font-size:11px;letter-spacing:1.4px;font-weight:bold">COMMODITY BAD DEBT · Q37</div>' +
+        '<div style="font-size:26px;font-weight:bold;margin-top:6px">' + escapeHtml_(theme.badge) + '</div>' +
+        '<div style="font-size:13px;margin-top:6px;opacity:0.92">' + escapeHtml_(payload.metricLabel) + '</div>' +
+      '</td></tr>' +
+      '<tr><td style="padding:20px 24px;border:1px solid #E8EAED;border-top:0">' +
+        '<div style="font-size:12px;color:#5F6368;text-transform:uppercase;letter-spacing:0.6px">Current value</div>' +
+        '<div style="font-size:28px;font-weight:bold;color:#202124;margin:4px 0 2px">' + escapeHtml_(payload.formattedValue) + '</div>' +
+        '<p style="margin:12px 0 18px;font-size:14px;line-height:1.45;color:#3C4043">' + escapeHtml_(theme.meaning) + '</p>' +
+        '<div style="font-size:12px;color:#5F6368;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:6px">Threshold bands</div>' +
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:13px;margin-bottom:16px">' +
+          ladder +
+        '</table>' +
+        '<table role="presentation" cellpadding="0" cellspacing="0" style="font-size:13px;color:#3C4043">' +
+          rowHtml_('Sheet', payload.sheetName + '!' + payload.cell) +
           rowHtml_('Severity', change) +
-          rowHtml_('Amber', '> 3.5mm') +
-          rowHtml_('Red', '> 4.0mm') +
-          rowHtml_('Black', '> 5.5mm') +
           rowHtml_('Checked at', payload.checkedAt) +
         '</table>' +
-        '<p style="margin:16px 0 0">' +
-          '<a href="' + escapeHtml_(payload.spreadsheetUrl) + '">Open spreadsheet</a>' +
-        '</p>' +
-      '</div>' +
-    '</div>'
+        '<table role="presentation" cellpadding="0" cellspacing="0" style="margin-top:18px"><tr>' +
+          '<td style="background:' + theme.color + ';border-radius:4px">' +
+            '<a href="' + escapeHtml_(payload.spreadsheetUrl) + '" style="display:inline-block;padding:10px 16px;color:' + theme.text + ';text-decoration:none;font-size:13px;font-weight:bold">Open spreadsheet</a>' +
+          '</td>' +
+        '</tr></table>' +
+      '</td></tr>' +
+    '</table>'
   );
 }
 
 function rowHtml_(label, value) {
   return (
     '<tr>' +
-      '<td style="padding:4px 16px 4px 0;color:#5f6368">' + escapeHtml_(label) + '</td>' +
-      '<td style="padding:4px 0">' + escapeHtml_(String(value)) + '</td>' +
+      '<td style="padding:3px 18px 3px 0;color:#5F6368;white-space:nowrap">' + escapeHtml_(label) + '</td>' +
+      '<td style="padding:3px 0;font-weight:bold">' + escapeHtml_(String(value)) + '</td>' +
     '</tr>'
   );
 }
@@ -387,11 +455,12 @@ function shouldNotify(previousSeverity, currentSeverity, notifyWhileUnchanged) {
   return !!notifyWhileUnchanged;
 }
 
-function buildAlertSubject(severity, formattedValue) {
+function buildAlertSubject(severity, formattedValue, sample) {
+  const prefix = sample ? '[SAMPLE] ' : '';
   if (severity === 'NONE') {
-    return '[CLEARED] Commodity bad debt Q37 back below 3.5mm — ' + formattedValue;
+    return prefix + '[CLEARED] Commodity bad debt Q37 back below 3.5mm — ' + formattedValue;
   }
-  return '[' + severity + '] Commodity bad debt Q37 = ' + formattedValue;
+  return prefix + '[' + severity + '] Commodity bad debt Q37 = ' + formattedValue;
 }
 
 function buildAlertText(opts) {
@@ -404,4 +473,30 @@ function buildAlertText(opts) {
   if (opts.checkedAt) lines.push('Checked at: ' + opts.checkedAt);
   if (opts.spreadsheetUrl) lines.push('Sheet: ' + opts.spreadsheetUrl);
   return lines.join('\n');
+}
+
+function getSamplePayloads_() {
+  const rows = [
+    { key: 'amber', severity: 'AMBER', previousSeverity: 'NONE', value: 3720000 },
+    { key: 'red', severity: 'RED', previousSeverity: 'AMBER', value: 4450000 },
+    { key: 'black', severity: 'BLACK', previousSeverity: 'RED', value: 5820000 },
+    { key: 'cleared', severity: 'NONE', previousSeverity: 'AMBER', value: 1997916 }
+  ];
+  return rows.map(function (spec) {
+    return {
+      key: spec.key,
+      metricLabel: CONFIG.METRIC_LABEL,
+      sheetName: CONFIG.SHEET_NAME,
+      cell: CONFIG.CELL,
+      value: spec.value,
+      formattedValue: formatMillions(spec.value),
+      severity: spec.severity,
+      previousSeverity: spec.previousSeverity,
+      checkedAt: '13 Aug 2026, 14:33 IST',
+      spreadsheetUrl: SpreadsheetApp.getActiveSpreadsheet()
+        ? SpreadsheetApp.getActiveSpreadsheet().getUrl()
+        : 'https://docs.google.com/spreadsheets',
+      sample: true
+    };
+  });
 }

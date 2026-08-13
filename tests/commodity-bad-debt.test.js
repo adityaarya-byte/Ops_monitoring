@@ -11,6 +11,9 @@ const {
   hourKey,
   shouldNotify,
   buildAlertSubject,
+  buildEmailHtml,
+  getSamplePayloads,
+  SEVERITY_THEME,
   THRESHOLDS
 } = require('../src/commodity-bad-debt');
 
@@ -115,6 +118,38 @@ run('subject includes severity and value', function () {
 run('cleared subject when back below amber', function () {
   const s = buildAlertSubject('NONE', '2.00mm (1,997,916)');
   assert.ok(s.indexOf('[CLEARED]') === 0);
+});
+
+run('sample subject is prefixed so it is not confused with live alerts', function () {
+  const s = buildAlertSubject('AMBER', '3.72mm (3,720,000)', true);
+  assert.ok(s.indexOf('[SAMPLE] [AMBER]') === 0);
+});
+
+run('sample payloads cover all four conditions with matching HTML colors', function () {
+  const samples = getSamplePayloads();
+  assert.strictEqual(samples.length, 4);
+  const byKey = {};
+  samples.forEach(function (p) { byKey[p.key] = p; });
+
+  const amber = buildEmailHtml(byKey.amber);
+  assert.ok(amber.indexOf('AMBER ALERT') !== -1);
+  assert.ok(amber.indexOf(SEVERITY_THEME.AMBER.color) !== -1);
+  assert.ok(amber.indexOf('&gt; 3.5mm') !== -1);
+  assert.ok(amber.indexOf('← current') !== -1);
+
+  const red = buildEmailHtml(byKey.red);
+  assert.ok(red.indexOf('RED ALERT') !== -1);
+  assert.ok(red.indexOf(SEVERITY_THEME.RED.color) !== -1);
+
+  const black = buildEmailHtml(byKey.black);
+  assert.ok(black.indexOf('BLACK ALERT') !== -1);
+  assert.ok(black.indexOf(SEVERITY_THEME.BLACK.color) !== -1);
+  assert.ok(black.indexOf('&gt; 5.5mm') !== -1);
+
+  const cleared = buildEmailHtml(byKey.cleared);
+  assert.ok(cleared.indexOf('CLEARED') !== -1);
+  assert.ok(cleared.indexOf(SEVERITY_THEME.NONE.color) !== -1);
+  assert.ok(cleared.indexOf('1,997,916') !== -1);
 });
 
 if (!process.exitCode) {

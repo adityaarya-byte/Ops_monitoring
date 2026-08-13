@@ -11,6 +11,24 @@ Hourly check of **Updated Auto-fund movement calculations → Commodity Bad debt
 
 Current screenshot value (~1.99mm) is below all thresholds, so no alert would send.
 
+## What the email looks like
+
+From: **Commodity Bad Debt Alert**  
+Same HTML for Gmail (inline CSS + tables).
+
+| Condition | When | Sample subject | Color |
+|---|---|---|---|
+| **Amber** | Q37 **> 3.5mm** and ≤ 4.0mm | `[AMBER] Commodity bad debt Q37 = 3.72mm (3,720,000)` | Gold `#F9AB00` |
+| **Red** | Q37 **> 4.0mm** and ≤ 5.5mm | `[RED] Commodity bad debt Q37 = 4.45mm (4,450,000)` | Red `#D93025` |
+| **Black** | Q37 **> 5.5mm** | `[BLACK] Commodity bad debt Q37 = 5.82mm (5,820,000)` | Black `#202124` |
+| **Cleared** | Q37 drops back to **≤ 3.5mm** | `[CLEARED] Commodity bad debt Q37 back below 3.5mm — 2.00mm (1,997,916)` | Green `#188038` |
+
+Body (every mail): colored header, large Q37 value, one-line meaning, threshold ladder with the active band highlighted, sheet / severity change / checked-at, **Open spreadsheet** button.
+
+Previews: [`email-samples/index.html`](email-samples/index.html) (open in a browser) or the PNGs in [`email-samples/`](email-samples/).
+
+To receive all four in your real inbox after the script is pasted into Apps Script, run **`sendSampleAlertEmails`**. Subjects are prefixed `[SAMPLE]` so they are not confused with live alerts.
+
 ## Which channel to use
 
 **Start with email.** Google Apps Script can send Gmail from the account that owns the script. No Slack app, webhook, or extra quota setup. That is the fastest way to get paged after the :33 check.
@@ -62,6 +80,7 @@ Helpers:
 | Function | Purpose |
 |---|---|
 | `testAlertNow` | Read Q37 and send immediately (ignore the :33 window) |
+| `sendSampleAlertEmails` | Send four SAMPLE mails (Amber / Red / Black / Cleared) without reading the live cell |
 | `dryRunCheck` | Read Q37, log payload, send nothing |
 | `installTrigger` | Start the hourly :33 check |
 | `uninstallTriggers` | Stop it |
