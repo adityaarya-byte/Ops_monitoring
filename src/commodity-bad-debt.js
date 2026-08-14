@@ -56,25 +56,75 @@ const SAMPLE_ALERTS = [
     key: 'amber',
     severity: 'AMBER',
     previousSeverity: 'NONE',
-    value: 3720000
+    value: 3720000,
+    checkedAt: '13 Aug 2026, 13:33 IST',
+    prevState: { value: 1997916, severity: 'NONE', checkedAt: '13 Aug 2026, 12:33 IST', breachStreak: 0, snaps: [] }
+  },
+  {
+    key: 'persist',
+    severity: 'AMBER',
+    previousSeverity: 'AMBER',
+    value: 3910000,
+    checkedAt: '13 Aug 2026, 14:33 IST',
+    prevState: {
+      value: 3720000,
+      severity: 'AMBER',
+      checkedAt: '13 Aug 2026, 13:33 IST',
+      breachStreak: 1,
+      breachStartedAt: '13 Aug 2026, 13:33 IST',
+      snaps: [{ checkedAt: '13 Aug 2026, 13:33 IST', value: 3720000, severity: 'AMBER' }]
+    }
   },
   {
     key: 'red',
     severity: 'RED',
     previousSeverity: 'AMBER',
-    value: 4450000
+    value: 4450000,
+    checkedAt: '13 Aug 2026, 14:33 IST',
+    prevState: {
+      value: 3720000,
+      severity: 'AMBER',
+      checkedAt: '13 Aug 2026, 13:33 IST',
+      breachStreak: 1,
+      breachStartedAt: '13 Aug 2026, 13:33 IST',
+      snaps: [{ checkedAt: '13 Aug 2026, 13:33 IST', value: 3720000, severity: 'AMBER' }]
+    }
   },
   {
     key: 'black',
     severity: 'BLACK',
     previousSeverity: 'RED',
-    value: 5820000
+    value: 5820000,
+    checkedAt: '13 Aug 2026, 15:33 IST',
+    prevState: {
+      value: 4450000,
+      severity: 'RED',
+      checkedAt: '13 Aug 2026, 14:33 IST',
+      breachStreak: 2,
+      breachStartedAt: '13 Aug 2026, 13:33 IST',
+      snaps: [
+        { checkedAt: '13 Aug 2026, 13:33 IST', value: 3720000, severity: 'AMBER' },
+        { checkedAt: '13 Aug 2026, 14:33 IST', value: 4450000, severity: 'RED' }
+      ]
+    }
   },
   {
     key: 'cleared',
     severity: 'NONE',
     previousSeverity: 'AMBER',
-    value: 1997916
+    value: 1997916,
+    checkedAt: '13 Aug 2026, 15:33 IST',
+    prevState: {
+      value: 3910000,
+      severity: 'AMBER',
+      checkedAt: '13 Aug 2026, 14:33 IST',
+      breachStreak: 2,
+      breachStartedAt: '13 Aug 2026, 13:33 IST',
+      snaps: [
+        { checkedAt: '13 Aug 2026, 13:33 IST', value: 3720000, severity: 'AMBER' },
+        { checkedAt: '13 Aug 2026, 14:33 IST', value: 3910000, severity: 'AMBER' }
+      ]
+    }
   }
 ];
 
@@ -140,12 +190,121 @@ function shouldNotify(previousSeverity, currentSeverity, notifyWhileUnchanged) {
   return !!notifyWhileUnchanged;
 }
 
-function buildAlertSubject(severity, formattedValue, sample) {
-  const prefix = sample ? '[SAMPLE] ' : '';
-  if (severity === 'NONE') {
-    return prefix + '[CLEARED] Commodity bad debt Q37 back below 3.5mm — ' + formattedValue;
+function describeValueChange(previousValue, currentValue) {
+  const prev = Number(previousValue);
+  const curr = Number(currentValue);
+  if (!isFinite(prev) || !isFinite(curr)) {
+    return {
+      direction: 'UNKNOWN',
+      delta: null,
+      label: 'No prior snap to compare',
+      short: ''
+    };
   }
-  return prefix + '[' + severity + '] Commodity bad debt Q37 = ' + formattedValue;
+  const delta = curr - prev;
+  if (delta > 0) {
+    return {
+      direction: 'INCREASE',
+      delta: delta,
+      label: 'Increased vs last snap by ' + formatMillions(delta),
+      short: '↑ +' + (delta / 1000000).toFixed(2) + 'mm'
+    };
+  }
+  if (delta < 0) {
+    return {
+      direction: 'DECREASE',
+      delta: delta,
+      label: 'Decreased vs last snap by ' + formatMillions(Math.abs(delta)),
+      short: '↓ −' + (Math.abs(delta) / 1000000).toFixed(2) + 'mm'
+    };
+  }
+  return {
+    direction: 'UNCHANGED',
+    delta: 0,
+    label: 'Unchanged vs last snap',
+    short: '→ 0.00mm'
+  };
+}
+
+function formatBreachDuration(streak, cleared) {
+  const n = Number(streak) || 0;
+  if (cleared) {
+    if (n < 1) return 'Cleared — back at or below 3.5mm';
+    return (
+      'Cleared after ' + n + ' hourly snap' + (n === 1 ? '' : 's') +
+      ' in breach (~' + n + ' hour' + (n === 1 ? '' : 's') + ')'
+    );
+  }
+  if (n <= 1) return 'First hourly snap in breach';
+  return 'Persistent — breaching across last ' + n + ' snaps (~' + n + ' hours)';
+}
+
+/**
+ * Compare this hourly reading to the stored previous snap.
+ * prevState: { value, severity, checkedAt, breachStreak, breachStartedAt, snaps }
+ */
+function applySnapshot(prevState, reading) {
+  const prev = prevState || {};
+  const change = describeValueChange(prev.value, reading.value);
+  const prevSeverity = prev.severity || 'NONE';
+  const currSeverity = reading.severity || 'NONE';
+  const cleared = currSeverity === 'NONE' && prevSeverity !== 'NONE';
+
+  let breachStreak = 0;
+  let breachStartedAt = '';
+  if (currSeverity !== 'NONE') {
+    if (prevSeverity !== 'NONE') {
+      breachStreak = (Number(prev.breachStreak) || 1) + 1;
+      breachStartedAt = prev.breachStartedAt || prev.checkedAt || reading.checkedAt;
+    } else {
+      breachStreak = 1;
+      breachStartedAt = reading.checkedAt;
+    }
+  }
+
+  const snaps = (prev.snaps || []).slice(-4);
+  snaps.push({
+    checkedAt: reading.checkedAt,
+    value: reading.value,
+    severity: currSeverity
+  });
+
+  const recoveredAfterSnaps = cleared ? (Number(prev.breachStreak) || 1) : 0;
+  const durationStreak = cleared ? recoveredAfterSnaps : breachStreak;
+
+  return {
+    change: change,
+    breachStreak: breachStreak,
+    breachStartedAt: breachStartedAt,
+    previousValue: prev.value,
+    previousSeverity: prevSeverity,
+    previousCheckedAt: prev.checkedAt || '',
+    lastSnaps: snaps.slice(-3),
+    recoveredAfterSnaps: recoveredAfterSnaps,
+    durationLabel: formatBreachDuration(durationStreak, currSeverity === 'NONE'),
+    nextState: {
+      value: reading.value,
+      severity: currSeverity,
+      checkedAt: reading.checkedAt,
+      hour: reading.hour || '',
+      breachStreak: breachStreak,
+      breachStartedAt: breachStartedAt,
+      snaps: snaps.slice(-5)
+    }
+  };
+}
+
+function buildAlertSubject(severity, formattedValue, sample, meta) {
+  const prefix = sample ? '[SAMPLE] ' : '';
+  meta = meta || {};
+  const changeShort = meta.change && meta.change.short ? ' ' + meta.change.short : '';
+  if (severity === 'NONE') {
+    return prefix + '[CLEARED] Commodity bad debt Q37 back below 3.5mm — ' + formattedValue + changeShort;
+  }
+  const persist = meta.breachStreak >= 2
+    ? ' Persistent ' + meta.breachStreak + ' snaps ·'
+    : '';
+  return prefix + '[' + severity + ']' + persist + ' Commodity bad debt Q37 = ' + formattedValue + changeShort;
 }
 
 function buildAlertText(opts) {
@@ -170,7 +329,12 @@ function escapeHtml(s) {
 
 function buildSamplePayload(spec) {
   const formattedValue = formatMillions(spec.value);
-  return {
+  const snap = applySnapshot(spec.prevState || {}, {
+    value: spec.value,
+    severity: spec.severity,
+    checkedAt: spec.checkedAt || '13 Aug 2026, 14:33 IST'
+  });
+  return Object.assign({
     key: spec.key,
     metricLabel: 'Gold OI greater than 20x (Bad Debt)',
     sheetName: 'Commodity Bad debt',
@@ -178,11 +342,11 @@ function buildSamplePayload(spec) {
     value: spec.value,
     formattedValue: formattedValue,
     severity: spec.severity,
-    previousSeverity: spec.previousSeverity,
+    previousSeverity: spec.previousSeverity || snap.previousSeverity,
     checkedAt: spec.checkedAt || '13 Aug 2026, 14:33 IST',
     spreadsheetUrl: spec.spreadsheetUrl || 'https://docs.google.com/spreadsheets',
     sample: true
-  };
+  }, snap);
 }
 
 function getSamplePayloads() {
@@ -222,6 +386,11 @@ function buildEmailHtml(payload) {
       '</tr>';
   }
 
+  const valueChange = payload.change || {};
+  const changeColor = valueChange.direction === 'INCREASE'
+    ? '#D93025'
+    : valueChange.direction === 'DECREASE' ? '#188038' : '#5F6368';
+
   return (
     '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;font-family:Arial,Helvetica,sans-serif;border-collapse:collapse">' +
       '<tr><td style="background:' + theme.color + ';color:' + theme.text + ';padding:20px 24px">' +
@@ -232,7 +401,13 @@ function buildEmailHtml(payload) {
       '<tr><td style="padding:20px 24px;border:1px solid #E8EAED;border-top:0">' +
         '<div style="font-size:12px;color:#5F6368;text-transform:uppercase;letter-spacing:0.6px">Current value</div>' +
         '<div style="font-size:28px;font-weight:bold;color:#202124;margin:4px 0 2px">' + escapeHtml(payload.formattedValue) + '</div>' +
-        '<p style="margin:12px 0 18px;font-size:14px;line-height:1.45;color:#3C4043">' + escapeHtml(theme.meaning) + '</p>' +
+        (valueChange.label
+          ? '<div style="font-size:15px;font-weight:bold;color:' + changeColor + ';margin:0 0 10px">' +
+              escapeHtml((valueChange.short ? valueChange.short + ' · ' : '') + valueChange.label) +
+            '</div>'
+          : '') +
+        '<p style="margin:0 0 14px;font-size:14px;line-height:1.45;color:#3C4043">' + escapeHtml(theme.meaning) + '</p>' +
+        buildSnapSectionHtml(payload) +
         '<div style="font-size:12px;color:#5F6368;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:6px">Threshold bands</div>' +
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:13px;margin-bottom:16px">' +
           ladder +
@@ -240,6 +415,7 @@ function buildEmailHtml(payload) {
         '<table role="presentation" cellpadding="0" cellspacing="0" style="font-size:13px;color:#3C4043">' +
           emailRow('Sheet', payload.sheetName + '!' + payload.cell) +
           emailRow('Severity', change) +
+          emailRow('Breach time', payload.durationLabel || '—') +
           emailRow('Checked at', payload.checkedAt) +
         '</table>' +
         '<table role="presentation" cellpadding="0" cellspacing="0" style="margin-top:18px"><tr>' +
@@ -248,6 +424,35 @@ function buildEmailHtml(payload) {
           '</td>' +
         '</tr></table>' +
       '</td></tr>' +
+    '</table>'
+  );
+}
+
+function buildSnapSectionHtml(payload) {
+  const snaps = (payload.lastSnaps || []).slice(-2);
+  if (snaps.length < 1) return '';
+  let rows = '';
+  for (let i = 0; i < snaps.length; i++) {
+    const s = snaps[i];
+    const label = s.severity === 'NONE' ? 'OK' : s.severity;
+    const isLast = i === snaps.length - 1;
+    rows +=
+      '<tr>' +
+        '<td style="padding:8px 10px;border-bottom:1px solid #E8EAED;color:#5F6368">' + escapeHtml(s.checkedAt || '') + '</td>' +
+        '<td style="padding:8px 10px;border-bottom:1px solid #E8EAED;font-weight:bold">' + escapeHtml(formatMillions(s.value)) + '</td>' +
+        '<td style="padding:8px 10px;border-bottom:1px solid #E8EAED">' + escapeHtml(label) + (isLast ? ' ← now' : '') + '</td>' +
+      '</tr>';
+  }
+  const title = snaps.length >= 2 ? 'Last 2 snaps' : 'This snap';
+  return (
+    '<div style="font-size:12px;color:#5F6368;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:6px">' + title + '</div>' +
+    '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:13px;margin-bottom:14px">' +
+      '<tr>' +
+        '<td style="padding:6px 10px;color:#5F6368;border-bottom:1px solid #E8EAED">Checked</td>' +
+        '<td style="padding:6px 10px;color:#5F6368;border-bottom:1px solid #E8EAED">Q37</td>' +
+        '<td style="padding:6px 10px;color:#5F6368;border-bottom:1px solid #E8EAED">Band</td>' +
+      '</tr>' +
+      rows +
     '</table>'
   );
 }
@@ -272,10 +477,14 @@ module.exports = {
   isInCheckWindow,
   hourKey,
   shouldNotify,
+  describeValueChange,
+  formatBreachDuration,
+  applySnapshot,
   buildAlertSubject,
   buildAlertText,
   escapeHtml,
   buildSamplePayload,
   getSamplePayloads,
-  buildEmailHtml
+  buildEmailHtml,
+  buildSnapSectionHtml
 };

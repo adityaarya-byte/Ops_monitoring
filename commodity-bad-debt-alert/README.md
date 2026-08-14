@@ -18,12 +18,12 @@ Same HTML for Gmail (inline CSS + tables).
 
 | Condition | When | Sample subject | Color |
 |---|---|---|---|
-| **Amber** | Q37 **> 3.5mm** and ≤ 4.0mm | `[AMBER] Commodity bad debt Q37 = 3.72mm (3,720,000)` | Gold `#F9AB00` |
-| **Red** | Q37 **> 4.0mm** and ≤ 5.5mm | `[RED] Commodity bad debt Q37 = 4.45mm (4,450,000)` | Red `#D93025` |
-| **Black** | Q37 **> 5.5mm** | `[BLACK] Commodity bad debt Q37 = 5.82mm (5,820,000)` | Black `#202124` |
-| **Cleared** | Q37 drops back to **≤ 3.5mm** | `[CLEARED] Commodity bad debt Q37 back below 3.5mm — 2.00mm (1,997,916)` | Green `#188038` |
+| **Amber (first snap)** | Q37 first **> 3.5mm** | `[AMBER] Commodity bad debt Q37 = 3.72mm … ↑ +1.72mm` | Gold `#F9AB00` |
+| **Persistent (2nd snap)** | Still above 3.5mm | `[AMBER] Persistent 2 snaps · … ↑ +0.19mm` | Gold, last-2-snaps table |
+| **Red / Black** | Crosses 4.0mm / 5.5mm | `[RED] Persistent 2 snaps · …` / `[BLACK] Persistent 3 snaps · …` | Red / Black |
+| **Cleared (later snap)** | Back to **≤ 3.5mm** | `[CLEARED] … ↓ −1.91mm` | Green `#188038` |
 
-Body (every mail): colored header, large Q37 value, one-line meaning, threshold ladder with the active band highlighted, sheet / severity change / checked-at, **Open spreadsheet** button.
+Body: colored header, Q37 value, **↑ / ↓ vs last snap**, last 2 snaps table, breach time, threshold ladder, **Open spreadsheet**.
 
 Previews: [`email-samples/index.html`](email-samples/index.html) (open in a browser) or the PNGs in [`email-samples/`](email-samples/).
 
@@ -68,19 +68,25 @@ Apps Script cannot schedule “exactly minute 33” on an hourly trigger (`nearM
 3. Set `CONFIG.SLACK.ENABLED` to `true`.
 4. Run **`testAlertNow`** again and confirm the channel post.
 
-## Behaviour
+## Behaviour (hourly snaps)
 
-- **Amber / Red / Black** — email (and Slack if enabled) when Q37 is above that band.
-- **Hourly reminder** while still above Amber (`NOTIFY_WHILE_UNCHANGED: true`). Set that to `false` to only notify on severity change.
-- **CLEARED** — one message when the value falls back through 3.5mm.
-- A **Q37 Alert Log** tab is appended on each check if the script has edit access.
+Each :33 check is one **snap**. The script stores the previous snap and compares.
+
+| Snap | What happened | Email |
+|---|---|---|
+| **1** | Q37 first goes above 3.5mm | Amber / Red / Black. “First hourly snap in breach.” |
+| **2** | Still above 3.5mm after the next hourly refresh | Same (or worse) color. **Last 2 snaps** table + **↑ increase or ↓ decrease** vs the previous snap + “Persistent — breaching across last 2 snaps (~2 hours).” |
+| **3+** | Still breaching | Same persist mail, snap count / hours keep rising, still shows last 2 snaps and up/down. |
+| **Later snap** | Q37 back to **≤ 3.5mm** | **Green CLEARED**, last 2 snaps, decrease (or increase) vs previous, “Cleared after N hourly snaps in breach.” |
+
+No mail while it stays below 3.5mm. A **Q37 Alert Log** tab is appended on each check if the script has edit access.
 
 Helpers:
 
 | Function | Purpose |
 |---|---|
 | `testAlertNow` | Read Q37 and send immediately (ignore the :33 window) |
-| `sendSampleAlertEmails` | Send four SAMPLE mails (Amber / Red / Black / Cleared) without reading the live cell |
+| `sendSampleAlertEmails` | Send SAMPLE mails (first breach, persist 2 snaps, Red, Black, Cleared) |
 | `dryRunCheck` | Read Q37, log payload, send nothing |
 | `installTrigger` | Start the hourly :33 check |
 | `uninstallTriggers` | Stop it |

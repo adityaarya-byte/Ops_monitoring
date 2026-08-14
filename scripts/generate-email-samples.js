@@ -16,7 +16,7 @@ const OUT = path.join(__dirname, '..', 'commodity-bad-debt-alert', 'email-sample
 
 function gmailCard(payload) {
   const theme = SEVERITY_THEME[payload.severity] || SEVERITY_THEME.AMBER;
-  const subject = buildAlertSubject(payload.severity, payload.formattedValue, false);
+  const subject = buildAlertSubject(payload.severity, payload.formattedValue, false, payload);
   const from = 'Commodity Bad Debt Alert';
   return (
     '<article class="card">' +
@@ -70,8 +70,8 @@ fs.writeFileSync(path.join(OUT, 'index.html'), page('Q37 email samples', gallery
 
 samples.forEach(function (p) {
   const inner =
-    '<h1>' + (p.severity === 'NONE' ? 'CLEARED' : p.severity) + ' email</h1>' +
-    '<p class="lede">Subject: ' + buildAlertSubject(p.severity, p.formattedValue, false) + '</p>' +
+    '<h1>' + (p.key === 'persist' ? 'PERSISTENT (2 snaps)' : (p.severity === 'NONE' ? 'CLEARED' : p.severity)) + ' email</h1>' +
+    '<p class="lede">Subject: ' + buildAlertSubject(p.severity, p.formattedValue, false, p) + '</p>' +
     gmailCard(p);
   fs.writeFileSync(
     path.join(OUT, p.key + '.html'),

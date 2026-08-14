@@ -3,11 +3,11 @@
  *  Commodity Bad Debt alert — Gold OI > 20x (sheet "Commodity Bad debt" Q37)
  *
  *  Data in Updated Auto-fund movement calculations refreshes every hour
- *  between :25 and :32. This script checks Q37 at ~:33 and emails (and
- *  optionally posts to Slack) when the value crosses:
- *    Amber  > 3.5mm
- *    Red    > 4.0mm
- *    Black  > 5.5mm
+ *  between :25 and :32. This script checks Q37 at ~:33 (one snap per hour).
+ *    Snap 1 in breach → Amber / Red / Black email
+ *    Snap 2+ still in breach → persist email with last 2 snaps + ↑/↓
+ *    Later snap back ≤ 3.5mm → green CLEARED + change vs last snap
+ *    Amber  > 3.5mm | Red > 4.0mm | Black > 5.5mm
  *
  *  Keep helper logic in sync with src/commodity-bad-debt.js
  * ============================================================================
@@ -96,6 +96,7 @@ const SEVERITY_THEME = {
 
 const PROP_LAST_HOUR = 'Q37_LAST_CHECK_HOUR';
 const PROP_LAST_SEVERITY = 'Q37_LAST_SEVERITY';
+const PROP_SNAP_STATE = 'Q37_SNAP_STATE';
 
 // ============================================================================
 // SECTION 2: ENTRY POINTS
@@ -128,9 +129,8 @@ function dryRunCheck() {
 }
 
 /**
- * Sends four labelled SAMPLE emails (Amber / Red / Black / Cleared) using
- * example Q37 values so you can see color + format in Gmail. Does not read
- * the live sheet.
+ * Sends SAMPLE emails (first breach, persistent 2 snaps, Red, Black, Cleared)
+ * using example Q37 values. Does not read the live sheet.
  */
 function sendSampleAlertEmails() {
   const samples = getSamplePayloads_();
@@ -139,7 +139,7 @@ function sendSampleAlertEmails() {
   }
   Logger.log('Sent ' + samples.length + ' sample alert emails.');
   return samples.map(function (p) {
-    return { severity: p.severity, subject: buildAlertSubject(p.severity, p.formattedValue, p.sample) };
+    return { severity: p.severity, subject: buildAlertSubject(p.severity, p.formattedValue, p.sample, p) };
   });
 }
 
@@ -200,11 +200,18 @@ function runCheck_(opts) {
   const value = Number(raw);
   const severity = classifySeverity(value, CONFIG.THRESHOLDS);
   const formattedValue = formatMillions(value);
-  const previousSeverity = props.getProperty(PROP_LAST_SEVERITY) || 'NONE';
   const checkedAt = Utilities.formatDate(now, tz, 'yyyy-MM-dd HH:mm:ss z');
   const spreadsheetUrl = ss.getUrl();
+  const prevState = loadSnapState_(props);
+  const snap = applySnapshot(prevState, {
+    value: isFinite(value) ? value : raw,
+    severity: severity,
+    checkedAt: checkedAt,
+    hour: hour
+  });
+  const previousSeverity = snap.previousSeverity || 'NONE';
 
-  const payload = {
+  const payload = Object.assign({
     metricLabel: CONFIG.METRIC_LABEL,
     sheetName: CONFIG.SHEET_NAME,
     cell: CONFIG.CELL,
@@ -214,7 +221,7 @@ function runCheck_(opts) {
     previousSeverity: previousSeverity,
     checkedAt: checkedAt,
     spreadsheetUrl: spreadsheetUrl
-  };
+  }, snap);
 
   const notify = opts.alwaysNotify ||
     shouldNotify(previousSeverity, severity, CONFIG.NOTIFY_WHILE_UNCHANGED);
@@ -222,6 +229,7 @@ function runCheck_(opts) {
   if (!opts.dryRun) {
     props.setProperty(PROP_LAST_HOUR, hour);
     props.setProperty(PROP_LAST_SEVERITY, severity);
+    props.setProperty(PROP_SNAP_STATE, JSON.stringify(snap.nextState));
     try {
       appendAlertLog_(ss, payload, notify);
     } catch (err) {
@@ -265,7 +273,7 @@ function sendEmailAlert_(payload) {
     return;
   }
 
-  const subject = buildAlertSubject(payload.severity, payload.formattedValue, payload.sample);
+  const subject = buildAlertSubject(payload.severity, payload.formattedValue, payload.sample, payload);
   const htmlBody = buildEmailHtml_(payload);
   const options = {
     to: to.join(','),
@@ -293,7 +301,7 @@ function sendSlackAlert_(payload) {
     : payload.severity + ' — Gold OI > 20x (Bad Debt)';
 
   const body = {
-    text: buildAlertSubject(payload.severity, payload.formattedValue, payload.sample),
+    text: buildAlertSubject(payload.severity, payload.formattedValue, payload.sample, payload),
     attachments: [{
       color: color,
       title: title,
@@ -353,7 +361,16 @@ function buildEmailHtml_(payload) {
       '<tr><td style="padding:20px 24px;border:1px solid #E8EAED;border-top:0">' +
         '<div style="font-size:12px;color:#5F6368;text-transform:uppercase;letter-spacing:0.6px">Current value</div>' +
         '<div style="font-size:28px;font-weight:bold;color:#202124;margin:4px 0 2px">' + escapeHtml_(payload.formattedValue) + '</div>' +
-        '<p style="margin:12px 0 18px;font-size:14px;line-height:1.45;color:#3C4043">' + escapeHtml_(theme.meaning) + '</p>' +
+        (payload.change && payload.change.label
+          ? '<div style="font-size:15px;font-weight:bold;color:' + (
+              payload.change.direction === 'INCREASE' ? '#D93025' :
+              payload.change.direction === 'DECREASE' ? '#188038' : '#5F6368'
+            ) + ';margin:0 0 10px">' +
+              escapeHtml_((payload.change.short ? payload.change.short + ' · ' : '') + payload.change.label) +
+            '</div>'
+          : '') +
+        '<p style="margin:0 0 14px;font-size:14px;line-height:1.45;color:#3C4043">' + escapeHtml_(theme.meaning) + '</p>' +
+        buildSnapSectionHtml_(payload) +
         '<div style="font-size:12px;color:#5F6368;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:6px">Threshold bands</div>' +
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:13px;margin-bottom:16px">' +
           ladder +
@@ -361,6 +378,7 @@ function buildEmailHtml_(payload) {
         '<table role="presentation" cellpadding="0" cellspacing="0" style="font-size:13px;color:#3C4043">' +
           rowHtml_('Sheet', payload.sheetName + '!' + payload.cell) +
           rowHtml_('Severity', change) +
+          rowHtml_('Breach time', payload.durationLabel || '—') +
           rowHtml_('Checked at', payload.checkedAt) +
         '</table>' +
         '<table role="presentation" cellpadding="0" cellspacing="0" style="margin-top:18px"><tr>' +
@@ -396,7 +414,8 @@ function escapeHtml_(s) {
 
 function appendAlertLog_(ss, payload, notified) {
   const headers = [
-    'checked_at', 'value', 'formatted', 'severity', 'previous_severity', 'notified'
+    'checked_at', 'value', 'formatted', 'severity', 'previous_severity',
+    'change', 'breach_snaps', 'breach_time', 'notified'
   ];
   let log = ss.getSheetByName(CONFIG.LOG_SHEET);
   if (!log) {
@@ -410,8 +429,30 @@ function appendAlertLog_(ss, payload, notified) {
     payload.formattedValue,
     payload.severity,
     payload.previousSeverity,
+    payload.change ? payload.change.label : '',
+    payload.breachStreak || payload.recoveredAfterSnaps || 0,
+    payload.durationLabel || '',
     notified ? 'yes' : 'no'
   ]);
+}
+
+function loadSnapState_(props) {
+  const raw = props.getProperty(PROP_SNAP_STATE);
+  if (raw) {
+    try {
+      return JSON.parse(raw);
+    } catch (err) {
+      Logger.log('Could not parse ' + PROP_SNAP_STATE + ': ' + err);
+    }
+  }
+  return {
+    value: null,
+    severity: props.getProperty(PROP_LAST_SEVERITY) || 'NONE',
+    checkedAt: '',
+    breachStreak: 0,
+    breachStartedAt: '',
+    snaps: []
+  };
 }
 
 // ============================================================================
@@ -455,12 +496,136 @@ function shouldNotify(previousSeverity, currentSeverity, notifyWhileUnchanged) {
   return !!notifyWhileUnchanged;
 }
 
-function buildAlertSubject(severity, formattedValue, sample) {
-  const prefix = sample ? '[SAMPLE] ' : '';
-  if (severity === 'NONE') {
-    return prefix + '[CLEARED] Commodity bad debt Q37 back below 3.5mm — ' + formattedValue;
+function describeValueChange(previousValue, currentValue) {
+  const prev = Number(previousValue);
+  const curr = Number(currentValue);
+  if (!isFinite(prev) || !isFinite(curr)) {
+    return { direction: 'UNKNOWN', delta: null, label: 'No prior snap to compare', short: '' };
   }
-  return prefix + '[' + severity + '] Commodity bad debt Q37 = ' + formattedValue;
+  const delta = curr - prev;
+  if (delta > 0) {
+    return {
+      direction: 'INCREASE',
+      delta: delta,
+      label: 'Increased vs last snap by ' + formatMillions(delta),
+      short: '↑ +' + (delta / 1000000).toFixed(2) + 'mm'
+    };
+  }
+  if (delta < 0) {
+    return {
+      direction: 'DECREASE',
+      delta: delta,
+      label: 'Decreased vs last snap by ' + formatMillions(Math.abs(delta)),
+      short: '↓ −' + (Math.abs(delta) / 1000000).toFixed(2) + 'mm'
+    };
+  }
+  return { direction: 'UNCHANGED', delta: 0, label: 'Unchanged vs last snap', short: '→ 0.00mm' };
+}
+
+function formatBreachDuration(streak, cleared) {
+  const n = Number(streak) || 0;
+  if (cleared) {
+    if (n < 1) return 'Cleared — back at or below 3.5mm';
+    return (
+      'Cleared after ' + n + ' hourly snap' + (n === 1 ? '' : 's') +
+      ' in breach (~' + n + ' hour' + (n === 1 ? '' : 's') + ')'
+    );
+  }
+  if (n <= 1) return 'First hourly snap in breach';
+  return 'Persistent — breaching across last ' + n + ' snaps (~' + n + ' hours)';
+}
+
+function applySnapshot(prevState, reading) {
+  const prev = prevState || {};
+  const change = describeValueChange(prev.value, reading.value);
+  const prevSeverity = prev.severity || 'NONE';
+  const currSeverity = reading.severity || 'NONE';
+  const cleared = currSeverity === 'NONE' && prevSeverity !== 'NONE';
+
+  let breachStreak = 0;
+  let breachStartedAt = '';
+  if (currSeverity !== 'NONE') {
+    if (prevSeverity !== 'NONE') {
+      breachStreak = (Number(prev.breachStreak) || 1) + 1;
+      breachStartedAt = prev.breachStartedAt || prev.checkedAt || reading.checkedAt;
+    } else {
+      breachStreak = 1;
+      breachStartedAt = reading.checkedAt;
+    }
+  }
+
+  const snaps = (prev.snaps || []).slice(-4);
+  snaps.push({
+    checkedAt: reading.checkedAt,
+    value: reading.value,
+    severity: currSeverity
+  });
+
+  const recoveredAfterSnaps = cleared ? (Number(prev.breachStreak) || 1) : 0;
+  const durationStreak = cleared ? recoveredAfterSnaps : breachStreak;
+
+  return {
+    change: change,
+    breachStreak: breachStreak,
+    breachStartedAt: breachStartedAt,
+    previousValue: prev.value,
+    previousSeverity: prevSeverity,
+    previousCheckedAt: prev.checkedAt || '',
+    lastSnaps: snaps.slice(-3),
+    recoveredAfterSnaps: recoveredAfterSnaps,
+    durationLabel: formatBreachDuration(durationStreak, currSeverity === 'NONE'),
+    nextState: {
+      value: reading.value,
+      severity: currSeverity,
+      checkedAt: reading.checkedAt,
+      hour: reading.hour || '',
+      breachStreak: breachStreak,
+      breachStartedAt: breachStartedAt,
+      snaps: snaps.slice(-5)
+    }
+  };
+}
+
+function buildAlertSubject(severity, formattedValue, sample, meta) {
+  const prefix = sample ? '[SAMPLE] ' : '';
+  meta = meta || {};
+  const changeShort = meta.change && meta.change.short ? ' ' + meta.change.short : '';
+  if (severity === 'NONE') {
+    return prefix + '[CLEARED] Commodity bad debt Q37 back below 3.5mm — ' + formattedValue + changeShort;
+  }
+  const persist = meta.breachStreak >= 2
+    ? ' Persistent ' + meta.breachStreak + ' snaps ·'
+    : '';
+  return prefix + '[' + severity + ']' + persist + ' Commodity bad debt Q37 = ' + formattedValue + changeShort;
+}
+
+function buildSnapSectionHtml_(payload) {
+  const snaps = (payload.lastSnaps || []).slice(-2);
+  if (snaps.length < 1) return '';
+  let rows = '';
+  for (let i = 0; i < snaps.length; i++) {
+    const s = snaps[i];
+    const label = s.severity === 'NONE' ? 'OK' : s.severity;
+    const isLast = i === snaps.length - 1;
+    rows +=
+      '<tr>' +
+        '<td style="padding:8px 10px;border-bottom:1px solid #E8EAED;color:#5F6368">' + escapeHtml_(s.checkedAt || '') + '</td>' +
+        '<td style="padding:8px 10px;border-bottom:1px solid #E8EAED;font-weight:bold">' + escapeHtml_(formatMillions(s.value)) + '</td>' +
+        '<td style="padding:8px 10px;border-bottom:1px solid #E8EAED">' + escapeHtml_(label) + (isLast ? ' ← now' : '') + '</td>' +
+      '</tr>';
+  }
+  const title = snaps.length >= 2 ? 'Last 2 snaps' : 'This snap';
+  return (
+    '<div style="font-size:12px;color:#5F6368;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:6px">' + title + '</div>' +
+    '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:13px;margin-bottom:14px">' +
+      '<tr>' +
+        '<td style="padding:6px 10px;color:#5F6368;border-bottom:1px solid #E8EAED">Checked</td>' +
+        '<td style="padding:6px 10px;color:#5F6368;border-bottom:1px solid #E8EAED">Q37</td>' +
+        '<td style="padding:6px 10px;color:#5F6368;border-bottom:1px solid #E8EAED">Band</td>' +
+      '</tr>' +
+      rows +
+    '</table>'
+  );
 }
 
 function buildAlertText(opts) {
@@ -476,14 +641,87 @@ function buildAlertText(opts) {
 }
 
 function getSamplePayloads_() {
+  const url = SpreadsheetApp.getActiveSpreadsheet()
+    ? SpreadsheetApp.getActiveSpreadsheet().getUrl()
+    : 'https://docs.google.com/spreadsheets';
   const rows = [
-    { key: 'amber', severity: 'AMBER', previousSeverity: 'NONE', value: 3720000 },
-    { key: 'red', severity: 'RED', previousSeverity: 'AMBER', value: 4450000 },
-    { key: 'black', severity: 'BLACK', previousSeverity: 'RED', value: 5820000 },
-    { key: 'cleared', severity: 'NONE', previousSeverity: 'AMBER', value: 1997916 }
+    {
+      key: 'amber',
+      severity: 'AMBER',
+      value: 3720000,
+      checkedAt: '13 Aug 2026, 13:33 IST',
+      prevState: { value: 1997916, severity: 'NONE', checkedAt: '13 Aug 2026, 12:33 IST', breachStreak: 0, snaps: [] }
+    },
+    {
+      key: 'persist',
+      severity: 'AMBER',
+      value: 3910000,
+      checkedAt: '13 Aug 2026, 14:33 IST',
+      prevState: {
+        value: 3720000,
+        severity: 'AMBER',
+        checkedAt: '13 Aug 2026, 13:33 IST',
+        breachStreak: 1,
+        breachStartedAt: '13 Aug 2026, 13:33 IST',
+        snaps: [{ checkedAt: '13 Aug 2026, 13:33 IST', value: 3720000, severity: 'AMBER' }]
+      }
+    },
+    {
+      key: 'red',
+      severity: 'RED',
+      value: 4450000,
+      checkedAt: '13 Aug 2026, 14:33 IST',
+      prevState: {
+        value: 3720000,
+        severity: 'AMBER',
+        checkedAt: '13 Aug 2026, 13:33 IST',
+        breachStreak: 1,
+        breachStartedAt: '13 Aug 2026, 13:33 IST',
+        snaps: [{ checkedAt: '13 Aug 2026, 13:33 IST', value: 3720000, severity: 'AMBER' }]
+      }
+    },
+    {
+      key: 'black',
+      severity: 'BLACK',
+      value: 5820000,
+      checkedAt: '13 Aug 2026, 15:33 IST',
+      prevState: {
+        value: 4450000,
+        severity: 'RED',
+        checkedAt: '13 Aug 2026, 14:33 IST',
+        breachStreak: 2,
+        breachStartedAt: '13 Aug 2026, 13:33 IST',
+        snaps: [
+          { checkedAt: '13 Aug 2026, 13:33 IST', value: 3720000, severity: 'AMBER' },
+          { checkedAt: '13 Aug 2026, 14:33 IST', value: 4450000, severity: 'RED' }
+        ]
+      }
+    },
+    {
+      key: 'cleared',
+      severity: 'NONE',
+      value: 1997916,
+      checkedAt: '13 Aug 2026, 15:33 IST',
+      prevState: {
+        value: 3910000,
+        severity: 'AMBER',
+        checkedAt: '13 Aug 2026, 14:33 IST',
+        breachStreak: 2,
+        breachStartedAt: '13 Aug 2026, 13:33 IST',
+        snaps: [
+          { checkedAt: '13 Aug 2026, 13:33 IST', value: 3720000, severity: 'AMBER' },
+          { checkedAt: '13 Aug 2026, 14:33 IST', value: 3910000, severity: 'AMBER' }
+        ]
+      }
+    }
   ];
   return rows.map(function (spec) {
-    return {
+    const snap = applySnapshot(spec.prevState, {
+      value: spec.value,
+      severity: spec.severity,
+      checkedAt: spec.checkedAt
+    });
+    return Object.assign({
       key: spec.key,
       metricLabel: CONFIG.METRIC_LABEL,
       sheetName: CONFIG.SHEET_NAME,
@@ -491,12 +729,9 @@ function getSamplePayloads_() {
       value: spec.value,
       formattedValue: formatMillions(spec.value),
       severity: spec.severity,
-      previousSeverity: spec.previousSeverity,
-      checkedAt: '13 Aug 2026, 14:33 IST',
-      spreadsheetUrl: SpreadsheetApp.getActiveSpreadsheet()
-        ? SpreadsheetApp.getActiveSpreadsheet().getUrl()
-        : 'https://docs.google.com/spreadsheets',
+      checkedAt: spec.checkedAt,
+      spreadsheetUrl: url,
       sample: true
-    };
+    }, snap);
   });
 }
