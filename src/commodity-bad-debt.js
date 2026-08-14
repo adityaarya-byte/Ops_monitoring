@@ -25,6 +25,12 @@ const SEVERITY_COLOR = {
 };
 
 const SEVERITY_THEME = {
+  DAILY: {
+    badge: '9 AM STATUS',
+    color: '#188038',
+    text: '#FFFFFF',
+    meaning: 'Daily morning check. Q37 is under 3.5mm — no breach. No more green mail until 9 AM tomorrow, unless it breaches.'
+  },
   NONE: {
     badge: 'CLEARED',
     color: '#188038',
@@ -53,6 +59,22 @@ const SEVERITY_THEME = {
 
 const SAMPLE_ALERTS = [
   {
+    key: 'daily',
+    severity: 'NONE',
+    previousSeverity: 'NONE',
+    value: 1997916,
+    checkedAt: '14 Aug 2026, 09:33 IST',
+    isMorning: true,
+    emailKind: 'DAILY',
+    prevState: {
+      value: 2010000,
+      severity: 'NONE',
+      checkedAt: '14 Aug 2026, 08:33 IST',
+      breachStreak: 0,
+      snaps: [{ checkedAt: '14 Aug 2026, 08:33 IST', value: 2010000, severity: 'NONE' }]
+    }
+  },
+  {
     key: 'amber',
     severity: 'AMBER',
     previousSeverity: 'NONE',
@@ -65,14 +87,16 @@ const SAMPLE_ALERTS = [
     severity: 'AMBER',
     previousSeverity: 'AMBER',
     value: 3910000,
-    checkedAt: '13 Aug 2026, 14:33 IST',
+    checkedAt: '14 Aug 2026, 09:33 IST',
+    isMorning: true,
+    emailKind: 'DAILY_BREACH',
     prevState: {
       value: 3720000,
       severity: 'AMBER',
-      checkedAt: '13 Aug 2026, 13:33 IST',
+      checkedAt: '14 Aug 2026, 08:33 IST',
       breachStreak: 1,
       breachStartedAt: '13 Aug 2026, 13:33 IST',
-      snaps: [{ checkedAt: '13 Aug 2026, 13:33 IST', value: 3720000, severity: 'AMBER' }]
+      snaps: [{ checkedAt: '14 Aug 2026, 08:33 IST', value: 3720000, severity: 'AMBER' }]
     }
   },
   {
@@ -183,11 +207,48 @@ function hourKey(date, timezone) {
  * Recovery (BLACK/RED/AMBER → NONE) also notifies.
  */
 function shouldNotify(previousSeverity, currentSeverity, notifyWhileUnchanged) {
+  return decideSend(previousSeverity, currentSeverity, {
+    notifyWhileUnchanged: notifyWhileUnchanged
+  }).send;
+}
+
+/**
+ * Hourly green-under-limit: no mail.
+ * Mail on first breach, severity change, and one CLEARED when it returns to normal.
+ * 9 AM: always one status mail (green or still breaching).
+ */
+function decideSend(previousSeverity, currentSeverity, options) {
   const prev = previousSeverity || 'NONE';
   const curr = currentSeverity || 'NONE';
-  if (prev !== curr) return true;
-  if (curr === 'NONE') return false;
-  return !!notifyWhileUnchanged;
+  const morning = !!(options && options.isMorning);
+  const persistHourly = !!(options && options.notifyWhileUnchanged);
+
+  if (prev !== curr) {
+    if (curr === 'NONE') return { send: true, kind: 'CLEARED' };
+    if (prev === 'NONE') return { send: true, kind: 'BREACH' };
+    return { send: true, kind: 'CHANGE' };
+  }
+  if (curr === 'NONE') {
+    return morning ? { send: true, kind: 'DAILY' } : { send: false, kind: 'SKIP' };
+  }
+  if (morning) return { send: true, kind: 'DAILY_BREACH' };
+  if (persistHourly) return { send: true, kind: 'PERSIST' };
+  return { send: false, kind: 'SKIP' };
+}
+
+function resolveEmailTheme(payload) {
+  const kind = payload && payload.emailKind;
+  if (kind === 'DAILY') return SEVERITY_THEME.DAILY;
+  const base = SEVERITY_THEME[(payload && payload.severity) || 'NONE'] || SEVERITY_THEME.AMBER;
+  if (kind === 'DAILY_BREACH') {
+    return {
+      badge: '9 AM · ' + base.badge,
+      color: base.color,
+      text: base.text,
+      meaning: 'Daily morning check. Still in breach. ' + base.meaning
+    };
+  }
+  return base;
 }
 
 function describeValueChange(previousValue, currentValue) {
@@ -298,8 +359,15 @@ function buildAlertSubject(severity, formattedValue, sample, meta) {
   const prefix = sample ? '[SAMPLE] ' : '';
   meta = meta || {};
   const changeShort = meta.change && meta.change.short ? ' ' + meta.change.short : '';
+  const kind = meta.emailKind || '';
+  if (kind === 'DAILY') {
+    return prefix + '[OK] 9 AM daily status — Q37 = ' + formattedValue + ' (under 3.5mm)' + changeShort;
+  }
   if (severity === 'NONE') {
     return prefix + '[CLEARED] Commodity bad debt Q37 back below 3.5mm — ' + formattedValue + changeShort;
+  }
+  if (kind === 'DAILY_BREACH') {
+    return prefix + '[' + severity + '] 9 AM status · still breaching · Q37 = ' + formattedValue + changeShort;
   }
   const persist = meta.breachStreak >= 2
     ? ' Persistent ' + meta.breachStreak + ' snaps ·'
@@ -334,6 +402,11 @@ function buildSamplePayload(spec) {
     severity: spec.severity,
     checkedAt: spec.checkedAt || '13 Aug 2026, 14:33 IST'
   });
+  const previousSeverity = spec.previousSeverity || snap.previousSeverity;
+  const decision = decideSend(previousSeverity, spec.severity, {
+    isMorning: !!spec.isMorning,
+    notifyWhileUnchanged: false
+  });
   return Object.assign({
     key: spec.key,
     metricLabel: 'Gold OI greater than 20x (Bad Debt)',
@@ -342,10 +415,12 @@ function buildSamplePayload(spec) {
     value: spec.value,
     formattedValue: formattedValue,
     severity: spec.severity,
-    previousSeverity: spec.previousSeverity || snap.previousSeverity,
+    previousSeverity: previousSeverity,
     checkedAt: spec.checkedAt || '13 Aug 2026, 14:33 IST',
     spreadsheetUrl: spec.spreadsheetUrl || 'https://docs.google.com/spreadsheets',
-    sample: true
+    sample: true,
+    emailKind: spec.emailKind || decision.kind,
+    isMorning: !!spec.isMorning
   }, snap);
 }
 
@@ -357,10 +432,10 @@ function getSamplePayloads() {
  * Gmail-safe HTML (tables + inline CSS) used by Apps Script MailApp.sendEmail.
  */
 function buildEmailHtml(payload) {
-  const theme = SEVERITY_THEME[payload.severity] || SEVERITY_THEME.AMBER;
+  const theme = resolveEmailTheme(payload);
   const change = payload.previousSeverity && payload.previousSeverity !== payload.severity
     ? payload.previousSeverity + ' → ' + (payload.severity === 'NONE' ? 'CLEARED' : payload.severity)
-    : (payload.severity === 'NONE' ? 'CLEARED' : payload.severity);
+    : (payload.emailKind === 'DAILY' ? 'OK (daily 9 AM)' : (payload.severity === 'NONE' ? 'CLEARED' : payload.severity));
   const bands = [
     { id: 'NONE', label: 'OK', condition: '≤ 3.5mm', color: '#188038' },
     { id: 'AMBER', label: 'AMBER', condition: '> 3.5mm', color: '#F9AB00' },
@@ -477,6 +552,8 @@ module.exports = {
   isInCheckWindow,
   hourKey,
   shouldNotify,
+  decideSend,
+  resolveEmailTheme,
   describeValueChange,
   formatBreachDuration,
   applySnapshot,

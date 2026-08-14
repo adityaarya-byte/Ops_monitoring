@@ -18,10 +18,11 @@ Same HTML for Gmail (inline CSS + tables).
 
 | Condition | When | Sample subject | Color |
 |---|---|---|---|
-| **Amber (first snap)** | Q37 first **> 3.5mm** | `[AMBER] Commodity bad debt Q37 = 3.72mm … ↑ +1.72mm` | Gold `#F9AB00` |
-| **Persistent (2nd snap)** | Still above 3.5mm | `[AMBER] Persistent 2 snaps · … ↑ +0.19mm` | Gold, last-2-snaps table |
-| **Red / Black** | Crosses 4.0mm / 5.5mm | `[RED] Persistent 2 snaps · …` / `[BLACK] Persistent 3 snaps · …` | Red / Black |
-| **Cleared (later snap)** | Back to **≤ 3.5mm** | `[CLEARED] … ↓ −1.91mm` | Green `#188038` |
+| **9 AM daily (green)** | Every morning, under limit | `[OK] 9 AM daily status — Q37 = 2.00mm (under 3.5mm)` | Green |
+| **Amber (first breach)** | Q37 first **> 3.5mm** | `[AMBER] Commodity bad debt Q37 = 3.72mm …` | Gold `#F9AB00` |
+| **9 AM still breaching** | Morning check while still over | `[AMBER] 9 AM status · still breaching · …` | Gold |
+| **Red / Black** | Crosses 4.0mm / 5.5mm | `[RED] …` / `[BLACK] …` | Red / Black |
+| **Cleared** | Back to **≤ 3.5mm** after a breach | `[CLEARED] … ↓ …` | Green `#188038` |
 
 Body: colored header, Q37 value, **↑ / ↓ vs last snap**, last 2 snaps table, breach time, threshold ladder, **Open spreadsheet**.
 
@@ -68,25 +69,27 @@ Apps Script cannot schedule “exactly minute 33” on an hourly trigger (`nearM
 3. Set `CONFIG.SLACK.ENABLED` to `true`.
 4. Run **`testAlertNow`** again and confirm the channel post.
 
-## Behaviour (hourly snaps)
+## Behaviour (when mail is sent)
 
-Each :33 check is one **snap**. The script stores the previous snap and compares.
+The script still **reads Q37 every hour at :33**. It does **not** email every hour when you are green.
 
-| Snap | What happened | Email |
-|---|---|---|
-| **1** | Q37 first goes above 3.5mm | Amber / Red / Black. “First hourly snap in breach.” |
-| **2** | Still above 3.5mm after the next hourly refresh | Same (or worse) color. **Last 2 snaps** table + **↑ increase or ↓ decrease** vs the previous snap + “Persistent — breaching across last 2 snaps (~2 hours).” |
-| **3+** | Still breaching | Same persist mail, snap count / hours keep rising, still shows last 2 snaps and up/down. |
-| **Later snap** | Q37 back to **≤ 3.5mm** | **Green CLEARED**, last 2 snaps, decrease (or increase) vs previous, “Cleared after N hourly snaps in breach.” |
+| Situation | Email? |
+|---|---|
+| Stays **under 3.5mm** (green) | **No** hourly mail |
+| First time it **breaches** (> 3.5mm / 4mm / 5.5mm) | **Yes** — Amber / Red / Black |
+| Band **changes** while still breaching (Amber → Red) | **Yes** |
+| Stays in the same breach band the next hours | **No** (until 9 AM) |
+| Comes **back to normal** (≤ 3.5mm) after a breach | **Yes — one green CLEARED** |
+| **9:33 AM IST every morning** | **Yes — always**, green or breaching (uses the 9:25–9:32 refresh) |
 
-No mail while it stays below 3.5mm. A **Q37 Alert Log** tab is appended on each check if the script has edit access.
+9 AM is the only scheduled green mail when nothing is wrong. After a CLEARED, you will not get another green until the next 9 AM (unless it breaches again).
 
 Helpers:
 
 | Function | Purpose |
 |---|---|
 | `testAlertNow` | Read Q37 and send immediately (ignore the :33 window) |
-| `sendSampleAlertEmails` | Send SAMPLE mails (first breach, persist 2 snaps, Red, Black, Cleared) |
+| `sendSampleAlertEmails` | Send SAMPLE mails (9 AM daily, first breach, 9 AM still-breaching, Red, Black, Cleared) |
 | `dryRunCheck` | Read Q37, log payload, send nothing |
 | `installTrigger` | Start the hourly :33 check |
 | `uninstallTriggers` | Stop it |

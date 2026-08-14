@@ -16,6 +16,7 @@ const {
   applySnapshot,
   describeValueChange,
   formatBreachDuration,
+  decideSend,
   SEVERITY_THEME,
   THRESHOLDS
 } = require('../src/commodity-bad-debt');
@@ -112,6 +113,19 @@ run('skip repeat NONE; optional hourly reminder while still alerting', function 
   assert.strictEqual(shouldNotify('AMBER', 'AMBER', true), true);
 });
 
+run('no hourly green while under limit; one CLEARED after a breach', function () {
+  assert.deepStrictEqual(decideSend('NONE', 'NONE', { isMorning: false }), { send: false, kind: 'SKIP' });
+  assert.deepStrictEqual(decideSend('NONE', 'AMBER', { isMorning: false }), { send: true, kind: 'BREACH' });
+  assert.deepStrictEqual(decideSend('AMBER', 'AMBER', { isMorning: false }), { send: false, kind: 'SKIP' });
+  assert.deepStrictEqual(decideSend('AMBER', 'NONE', { isMorning: false }), { send: true, kind: 'CLEARED' });
+});
+
+run('9 AM always sends: green daily or still-breaching status', function () {
+  assert.deepStrictEqual(decideSend('NONE', 'NONE', { isMorning: true }), { send: true, kind: 'DAILY' });
+  assert.deepStrictEqual(decideSend('AMBER', 'AMBER', { isMorning: true }), { send: true, kind: 'DAILY_BREACH' });
+  assert.deepStrictEqual(decideSend('AMBER', 'NONE', { isMorning: true }), { send: true, kind: 'CLEARED' });
+});
+
 run('subject includes severity and value', function () {
   const s = buildAlertSubject('RED', '4.20mm (4,200,000)');
   assert.ok(s.indexOf('[RED]') === 0);
@@ -169,11 +183,15 @@ run('persist duration copy', function () {
   assert.ok(formatBreachDuration(2, true).indexOf('Cleared after 2') === 0);
 });
 
-run('sample payloads cover first / persist / red / black / cleared', function () {
+run('sample payloads cover daily / first / persist / red / black / cleared', function () {
   const samples = getSamplePayloads();
-  assert.strictEqual(samples.length, 5);
+  assert.strictEqual(samples.length, 6);
   const byKey = {};
   samples.forEach(function (p) { byKey[p.key] = p; });
+
+  const daily = buildEmailHtml(byKey.daily);
+  assert.ok(daily.indexOf('9 AM STATUS') !== -1);
+  assert.ok(buildAlertSubject(byKey.daily.severity, byKey.daily.formattedValue, false, byKey.daily).indexOf('[OK] 9 AM') === 0);
 
   const amber = buildEmailHtml(byKey.amber);
   assert.ok(amber.indexOf('AMBER ALERT') !== -1);
@@ -185,7 +203,7 @@ run('sample payloads cover first / persist / red / black / cleared', function ()
   const persist = buildEmailHtml(byKey.persist);
   assert.ok(persist.indexOf('Last 2 snaps') !== -1);
   assert.ok(persist.indexOf('Increased vs last snap') !== -1);
-  assert.ok(persist.indexOf('last 2 snaps') !== -1);
+  assert.ok(persist.indexOf('9 AM') !== -1);
 
   const red = buildEmailHtml(byKey.red);
   assert.ok(red.indexOf('RED ALERT') !== -1);

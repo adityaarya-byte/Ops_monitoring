@@ -70,7 +70,7 @@ fs.writeFileSync(path.join(OUT, 'index.html'), page('Q37 email samples', gallery
 
 samples.forEach(function (p) {
   const inner =
-    '<h1>' + (p.key === 'persist' ? 'PERSISTENT (2 snaps)' : (p.severity === 'NONE' ? 'CLEARED' : p.severity)) + ' email</h1>' +
+    '<h1>' + (p.key === 'daily' ? '9 AM DAILY (green)' : p.key === 'persist' ? '9 AM STILL BREACHING' : (p.severity === 'NONE' ? 'CLEARED' : p.severity)) + ' email</h1>' +
     '<p class="lede">Subject: ' + buildAlertSubject(p.severity, p.formattedValue, false, p) + '</p>' +
     gmailCard(p);
   fs.writeFileSync(

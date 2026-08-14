@@ -4,9 +4,10 @@
  *
  *  Data in Updated Auto-fund movement calculations refreshes every hour
  *  between :25 and :32. This script checks Q37 at ~:33 (one snap per hour).
- *    Snap 1 in breach → Amber / Red / Black email
- *    Snap 2+ still in breach → persist email with last 2 snaps + ↑/↓
- *    Later snap back ≤ 3.5mm → green CLEARED + change vs last snap
+ *    First breach → Amber / Red / Black email
+ *    Stay green → no hourly mail
+ *    Back ≤ 3.5mm after a breach → one green CLEARED
+ *    9:33 IST every morning → one status mail (green or still breaching)
  *    Amber  > 3.5mm | Red > 4.0mm | Black > 5.5mm
  *
  *  Keep helper logic in sync with src/commodity-bad-debt.js
@@ -40,9 +41,12 @@ const CONFIG = {
   CHECK_WINDOW_MINUTES: 5,
   TIMEZONE: 'Asia/Kolkata',
 
-  // Hourly reminder while still Amber/Red/Black. Set false to only mail on
-  // severity change (including recovery to below 3.5mm).
-  NOTIFY_WHILE_UNCHANGED: true,
+  // 9 AM IST daily status (sent at the 9:33 snap so it uses the 9:25–9:32 refresh).
+  MORNING_HOUR: 9,
+
+  // Stay-in-same-breach hourly mail. Leave false: only first breach, band
+  // change, one CLEARED, plus the 9 AM status.
+  NOTIFY_WHILE_UNCHANGED: false,
 
   EMAIL: {
     ENABLED: true,
@@ -68,6 +72,12 @@ const SEVERITY_COLOR = {
 };
 
 const SEVERITY_THEME = {
+  DAILY: {
+    badge: '9 AM STATUS',
+    color: '#188038',
+    text: '#FFFFFF',
+    meaning: 'Daily morning check. Q37 is under 3.5mm — no breach. No more green mail until 9 AM tomorrow, unless it breaches.'
+  },
   NONE: {
     badge: 'CLEARED',
     color: '#188038',
@@ -129,8 +139,8 @@ function dryRunCheck() {
 }
 
 /**
- * Sends SAMPLE emails (first breach, persistent 2 snaps, Red, Black, Cleared)
- * using example Q37 values. Does not read the live sheet.
+ * Sends SAMPLE emails (9 AM daily, first breach, 9 AM still-breaching,
+ * Red, Black, Cleared). Does not read the live sheet.
  */
 function sendSampleAlertEmails() {
   const samples = getSamplePayloads_();
@@ -210,6 +220,16 @@ function runCheck_(opts) {
     hour: hour
   });
   const previousSeverity = snap.previousSeverity || 'NONE';
+  const hourNum = Number(Utilities.formatDate(now, tz, 'H'));
+  const isMorning = hourNum === CONFIG.MORNING_HOUR;
+  const decision = decideSend(previousSeverity, severity, {
+    isMorning: isMorning,
+    notifyWhileUnchanged: CONFIG.NOTIFY_WHILE_UNCHANGED
+  });
+  let emailKind = decision.kind;
+  if (opts.alwaysNotify && emailKind === 'SKIP') {
+    emailKind = severity === 'NONE' ? 'DAILY' : 'DAILY_BREACH';
+  }
 
   const payload = Object.assign({
     metricLabel: CONFIG.METRIC_LABEL,
@@ -220,11 +240,12 @@ function runCheck_(opts) {
     severity: severity,
     previousSeverity: previousSeverity,
     checkedAt: checkedAt,
-    spreadsheetUrl: spreadsheetUrl
+    spreadsheetUrl: spreadsheetUrl,
+    emailKind: emailKind,
+    isMorning: isMorning
   }, snap);
 
-  const notify = opts.alwaysNotify ||
-    shouldNotify(previousSeverity, severity, CONFIG.NOTIFY_WHILE_UNCHANGED);
+  const notify = opts.alwaysNotify || decision.send;
 
   if (!opts.dryRun) {
     props.setProperty(PROP_LAST_HOUR, hour);
@@ -322,10 +343,10 @@ function sendSlackAlert_(payload) {
 }
 
 function buildEmailHtml_(payload) {
-  const theme = SEVERITY_THEME[payload.severity] || SEVERITY_THEME.AMBER;
+  const theme = resolveEmailTheme(payload);
   const change = payload.previousSeverity && payload.previousSeverity !== payload.severity
     ? payload.previousSeverity + ' → ' + (payload.severity === 'NONE' ? 'CLEARED' : payload.severity)
-    : (payload.severity === 'NONE' ? 'CLEARED' : payload.severity);
+    : (payload.emailKind === 'DAILY' ? 'OK (daily 9 AM)' : (payload.severity === 'NONE' ? 'CLEARED' : payload.severity));
   const bands = [
     { id: 'NONE', label: 'OK', condition: '≤ 3.5mm', color: '#188038' },
     { id: 'AMBER', label: 'AMBER', condition: '> 3.5mm', color: '#F9AB00' },
@@ -489,11 +510,43 @@ function hourKey(date, timezone) {
 }
 
 function shouldNotify(previousSeverity, currentSeverity, notifyWhileUnchanged) {
+  return decideSend(previousSeverity, currentSeverity, {
+    notifyWhileUnchanged: notifyWhileUnchanged
+  }).send;
+}
+
+function decideSend(previousSeverity, currentSeverity, options) {
   const prev = previousSeverity || 'NONE';
   const curr = currentSeverity || 'NONE';
-  if (prev !== curr) return true;
-  if (curr === 'NONE') return false;
-  return !!notifyWhileUnchanged;
+  const morning = !!(options && options.isMorning);
+  const persistHourly = !!(options && options.notifyWhileUnchanged);
+
+  if (prev !== curr) {
+    if (curr === 'NONE') return { send: true, kind: 'CLEARED' };
+    if (prev === 'NONE') return { send: true, kind: 'BREACH' };
+    return { send: true, kind: 'CHANGE' };
+  }
+  if (curr === 'NONE') {
+    return morning ? { send: true, kind: 'DAILY' } : { send: false, kind: 'SKIP' };
+  }
+  if (morning) return { send: true, kind: 'DAILY_BREACH' };
+  if (persistHourly) return { send: true, kind: 'PERSIST' };
+  return { send: false, kind: 'SKIP' };
+}
+
+function resolveEmailTheme(payload) {
+  const kind = payload && payload.emailKind;
+  if (kind === 'DAILY') return SEVERITY_THEME.DAILY;
+  const base = SEVERITY_THEME[(payload && payload.severity) || 'NONE'] || SEVERITY_THEME.AMBER;
+  if (kind === 'DAILY_BREACH') {
+    return {
+      badge: '9 AM · ' + base.badge,
+      color: base.color,
+      text: base.text,
+      meaning: 'Daily morning check. Still in breach. ' + base.meaning
+    };
+  }
+  return base;
 }
 
 function describeValueChange(previousValue, currentValue) {
@@ -590,8 +643,15 @@ function buildAlertSubject(severity, formattedValue, sample, meta) {
   const prefix = sample ? '[SAMPLE] ' : '';
   meta = meta || {};
   const changeShort = meta.change && meta.change.short ? ' ' + meta.change.short : '';
+  const kind = meta.emailKind || '';
+  if (kind === 'DAILY') {
+    return prefix + '[OK] 9 AM daily status — Q37 = ' + formattedValue + ' (under 3.5mm)' + changeShort;
+  }
   if (severity === 'NONE') {
     return prefix + '[CLEARED] Commodity bad debt Q37 back below 3.5mm — ' + formattedValue + changeShort;
+  }
+  if (kind === 'DAILY_BREACH') {
+    return prefix + '[' + severity + '] 9 AM status · still breaching · Q37 = ' + formattedValue + changeShort;
   }
   const persist = meta.breachStreak >= 2
     ? ' Persistent ' + meta.breachStreak + ' snaps ·'
@@ -646,6 +706,21 @@ function getSamplePayloads_() {
     : 'https://docs.google.com/spreadsheets';
   const rows = [
     {
+      key: 'daily',
+      severity: 'NONE',
+      value: 1997916,
+      checkedAt: '14 Aug 2026, 09:33 IST',
+      isMorning: true,
+      emailKind: 'DAILY',
+      prevState: {
+        value: 2010000,
+        severity: 'NONE',
+        checkedAt: '14 Aug 2026, 08:33 IST',
+        breachStreak: 0,
+        snaps: [{ checkedAt: '14 Aug 2026, 08:33 IST', value: 2010000, severity: 'NONE' }]
+      }
+    },
+    {
       key: 'amber',
       severity: 'AMBER',
       value: 3720000,
@@ -656,14 +731,16 @@ function getSamplePayloads_() {
       key: 'persist',
       severity: 'AMBER',
       value: 3910000,
-      checkedAt: '13 Aug 2026, 14:33 IST',
+      checkedAt: '14 Aug 2026, 09:33 IST',
+      isMorning: true,
+      emailKind: 'DAILY_BREACH',
       prevState: {
         value: 3720000,
         severity: 'AMBER',
-        checkedAt: '13 Aug 2026, 13:33 IST',
+        checkedAt: '14 Aug 2026, 08:33 IST',
         breachStreak: 1,
         breachStartedAt: '13 Aug 2026, 13:33 IST',
-        snaps: [{ checkedAt: '13 Aug 2026, 13:33 IST', value: 3720000, severity: 'AMBER' }]
+        snaps: [{ checkedAt: '14 Aug 2026, 08:33 IST', value: 3720000, severity: 'AMBER' }]
       }
     },
     {
@@ -721,6 +798,10 @@ function getSamplePayloads_() {
       severity: spec.severity,
       checkedAt: spec.checkedAt
     });
+    const decision = decideSend(snap.previousSeverity, spec.severity, {
+      isMorning: !!spec.isMorning,
+      notifyWhileUnchanged: false
+    });
     return Object.assign({
       key: spec.key,
       metricLabel: CONFIG.METRIC_LABEL,
@@ -731,7 +812,9 @@ function getSamplePayloads_() {
       severity: spec.severity,
       checkedAt: spec.checkedAt,
       spreadsheetUrl: url,
-      sample: true
+      sample: true,
+      emailKind: spec.emailKind || decision.kind,
+      isMorning: !!spec.isMorning
     }, snap);
   });
 }
