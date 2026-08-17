@@ -154,12 +154,33 @@ const SAMPLE_ALERTS = [
 
 function classifySeverity(value, thresholds) {
   const t = thresholds || THRESHOLDS;
-  const n = Number(value);
+  const n = parseQ37Value(value);
   if (!isFinite(n)) return 'NONE';
   if (n > t.BLACK) return 'BLACK';
   if (n > t.RED) return 'RED';
   if (n > t.AMBER) return 'AMBER';
   return 'NONE';
+}
+
+/**
+ * Sheet stores full USDT (1,997,916). Manual tests often type 4.5 meaning 4.5mm.
+ * Values in (0, 1000) are treated as millions.
+ */
+function parseQ37Value(raw) {
+  if (raw === null || raw === undefined || raw === '') return NaN;
+  if (typeof raw === 'number') {
+    if (!isFinite(raw)) return NaN;
+    if (raw > 0 && raw < 1000) return raw * 1000000;
+    return raw;
+  }
+  let s = String(raw).trim().toLowerCase();
+  s = s.replace(/,/g, '');
+  s = s.replace(/mm$/i, '');
+  s = s.replace(/\s/g, '');
+  const n = Number(s);
+  if (!isFinite(n)) return NaN;
+  if (n > 0 && n < 1000) return n * 1000000;
+  return n;
 }
 
 function formatMillions(value) {
@@ -548,6 +569,7 @@ module.exports = {
   SEVERITY_THEME,
   SAMPLE_ALERTS,
   classifySeverity,
+  parseQ37Value,
   formatMillions,
   isInCheckWindow,
   hourKey,

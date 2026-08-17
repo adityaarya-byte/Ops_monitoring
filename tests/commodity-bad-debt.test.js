@@ -6,6 +6,7 @@
 const assert = require('assert');
 const {
   classifySeverity,
+  parseQ37Value,
   formatMillions,
   isInCheckWindow,
   hourKey,
@@ -32,7 +33,18 @@ function run(name, fn) {
   }
 }
 
-run('NONE at current screenshot value ~1.99mm', function () {
+run('4.5 typed as millions is Red (4.5mm)', function () {
+  assert.strictEqual(parseQ37Value(4.5), 4500000);
+  assert.strictEqual(parseQ37Value('4.5mm'), 4500000);
+  assert.strictEqual(parseQ37Value('4.5 mm'), 4500000);
+  assert.strictEqual(parseQ37Value('4,500,000'), 4500000);
+  assert.strictEqual(parseQ37Value(4500000), 4500000);
+  assert.strictEqual(classifySeverity(4.5), 'RED');
+  assert.strictEqual(classifySeverity('4.5mm'), 'RED');
+});
+
+run('live sheet full USDT is not scaled', function () {
+  assert.strictEqual(parseQ37Value(1997916), 1997916);
   assert.strictEqual(classifySeverity(1997916), 'NONE');
 });
 

@@ -113,10 +113,34 @@ const PROP_SNAP_STATE = 'Q37_SNAP_STATE';
 // ============================================================================
 
 /**
- * Time-driven entry. Install with installTrigger().
+ * Time-driven entry. When you press Run in the editor (no trigger event),
+ * the :33 window is skipped so a manual Q37 test can send immediately.
  */
-function checkCommodityBadDebt() {
-  runCheck_({ force: false, dryRun: false });
+function checkCommodityBadDebt(e) {
+  const fromTrigger = !!(e && e.triggerUid);
+  runCheck_({ force: !fromTrigger, dryRun: false, fromTrigger: fromTrigger });
+}
+
+/**
+ * Manual live test: read real Q37, ignore the :33 clock, send only if
+ * the breach / clear / 9 AM rules say so. Use this after you edit Q37.
+ */
+function runLiveCheckNow() {
+  const result = runCheck_({ force: true, dryRun: false, alwaysNotify: false });
+  Logger.log(JSON.stringify(result, null, 2));
+  if (result.skipped) {
+    Logger.log('No email: ' + result.reason);
+  } else if (!result.notified) {
+    Logger.log(
+      'No email: Q37 parsed=' + result.value +
+      ' severity=' + result.severity +
+      ' kind=' + result.emailKind +
+      ' (green-under-limit does not mail except 9 AM).'
+    );
+  } else {
+    Logger.log('Email sent: ' + result.emailKind + ' ' + result.formattedValue);
+  }
+  return result;
 }
 
 /**
@@ -191,6 +215,7 @@ function runCheck_(opts) {
   );
 
   if (!opts.force && !isInCheckWindow(minute, CONFIG.CHECK_MINUTE, CONFIG.CHECK_WINDOW_MINUTES)) {
+    Logger.log('Skipped: outside :33–:37 window (minute=' + minute + '). Run runLiveCheckNow for a manual test.');
     return { skipped: true, reason: 'outside-check-window', minute: minute };
   }
 
@@ -207,9 +232,20 @@ function runCheck_(opts) {
   }
 
   const raw = sheet.getRange(CONFIG.CELL).getValue();
-  const value = Number(raw);
+  const formula = sheet.getRange(CONFIG.CELL).getFormula();
+  const value = parseQ37Value(raw);
   const severity = classifySeverity(value, CONFIG.THRESHOLDS);
   const formattedValue = formatMillions(value);
+  Logger.log(
+    'Q37 raw=' + raw +
+    ' formula=' + (formula || '(none)') +
+    ' parsed=' + value +
+    ' formatted=' + formattedValue +
+    ' severity=' + severity
+  );
+  if (formula) {
+    Logger.log('Q37 still has a formula. A typed 4.5 will be overwritten by N/O totals. Overwrite Q37 or edit N35:O37.');
+  }
   const checkedAt = Utilities.formatDate(now, tz, 'yyyy-MM-dd HH:mm:ss z');
   const spreadsheetUrl = ss.getUrl();
   const prevState = loadSnapState_(props);
@@ -246,6 +282,13 @@ function runCheck_(opts) {
   }, snap);
 
   const notify = opts.alwaysNotify || decision.send;
+  Logger.log(
+    'decision=' + decision.kind +
+    ' send=' + decision.send +
+    ' alwaysNotify=' + !!opts.alwaysNotify +
+    ' notify=' + notify +
+    ' previous=' + previousSeverity
+  );
 
   if (!opts.dryRun) {
     props.setProperty(PROP_LAST_HOUR, hour);
@@ -482,12 +525,29 @@ function loadSnapState_(props) {
 
 function classifySeverity(value, thresholds) {
   const t = thresholds || CONFIG.THRESHOLDS;
-  const n = Number(value);
+  const n = parseQ37Value(value);
   if (!isFinite(n)) return 'NONE';
   if (n > t.BLACK) return 'BLACK';
   if (n > t.RED) return 'RED';
   if (n > t.AMBER) return 'AMBER';
   return 'NONE';
+}
+
+function parseQ37Value(raw) {
+  if (raw === null || raw === undefined || raw === '') return NaN;
+  if (typeof raw === 'number') {
+    if (!isFinite(raw)) return NaN;
+    if (raw > 0 && raw < 1000) return raw * 1000000;
+    return raw;
+  }
+  let s = String(raw).trim().toLowerCase();
+  s = s.replace(/,/g, '');
+  s = s.replace(/mm$/i, '');
+  s = s.replace(/\s/g, '');
+  const n = Number(s);
+  if (!isFinite(n)) return NaN;
+  if (n > 0 && n < 1000) return n * 1000000;
+  return n;
 }
 
 function formatMillions(value) {

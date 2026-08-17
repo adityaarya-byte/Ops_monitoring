@@ -88,7 +88,8 @@ Helpers:
 
 | Function | Purpose |
 |---|---|
-| `testAlertNow` | Read Q37 and send immediately (ignore the :33 window) |
+| `runLiveCheckNow` | Manual test of the **live Q37 cell** (ignores :33 clock). Use this after you type a test number. |
+| `testAlertNow` | Always sends one mail, even if still green |
 | `sendSampleAlertEmails` | Send SAMPLE mails (9 AM daily, first breach, 9 AM still-breaching, Red, Black, Cleared) |
 | `dryRunCheck` | Read Q37, log payload, send nothing |
 | `installTrigger` | Start the hourly :33 check |
