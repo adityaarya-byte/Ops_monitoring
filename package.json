@@ -1,0 +1,10 @@
+{
+  "name": "ops-monitoring",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Ops monitoring alerts (Google Apps Script)",
+  "scripts": {
+    "test": "node tests/commodity-bad-debt.test.js",
+    "generate:email-samples": "node scripts/generate-email-samples.js"
+  }
+}
