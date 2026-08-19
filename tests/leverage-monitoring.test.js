@@ -1,8 +1,33 @@
 'use strict';
 
 var assert = require('assert');
+var fs = require('fs');
 var path = require('path');
-var logic = require(path.join(__dirname, '..', 'leverage-monitoring', 'Code.gs'));
+var vm = require('vm');
+
+function loadLogic() {
+  var code = fs.readFileSync(path.join(__dirname, '..', 'leverage-monitoring', 'Code.gs'), 'utf8');
+  var sandbox = {
+    ScriptApp: { WeekDay: { MONDAY: 'MONDAY' } },
+    SpreadsheetApp: {},
+    MailApp: {},
+    Utilities: {},
+    Logger: { log: function () {} }
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(code, sandbox);
+  return {
+    CONFIG: sandbox.CONFIG,
+    toNumber: sandbox.toNumber,
+    safeDiv: sandbox.safeDiv,
+    isAboveNotionalFloor: sandbox.isAboveNotionalFloor,
+    mapHeaders: sandbox.mapHeaders,
+    evaluateRow: sandbox.evaluateRow,
+    buildSummary: sandbox.buildSummary
+  };
+}
+
+var logic = loadLogic();
 
 var COLS = {
   symbol: 0,

@@ -37,7 +37,7 @@ var CONFIG = {
   MAX_NOTIONAL_TIER_THRESHOLD: 450000,
 
   // Trigger schedule
-  TRIGGER_WEEKDAY: (typeof ScriptApp !== 'undefined') ? ScriptApp.WeekDay.MONDAY : 'MONDAY',
+  TRIGGER_WEEKDAY: ScriptApp.WeekDay.MONDAY,
   TRIGGER_HOUR: 8                        // 8am, in the spreadsheet's timezone
 };
 // =====================================================================
@@ -315,16 +315,4 @@ function setupWeeklyTrigger() {
     .create();
 
   Logger.log('Weekly trigger created: every ' + CONFIG.TRIGGER_WEEKDAY + ' at ' + CONFIG.TRIGGER_HOUR + ':00.');
-}
-
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {
-    CONFIG: CONFIG,
-    toNumber: toNumber,
-    safeDiv: safeDiv,
-    isAboveNotionalFloor: isAboveNotionalFloor,
-    mapHeaders: mapHeaders,
-    evaluateRow: evaluateRow,
-    buildSummary: buildSummary
-  };
 }

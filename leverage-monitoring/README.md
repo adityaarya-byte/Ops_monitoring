@@ -17,8 +17,12 @@ Utilization ≥ 100% on a name with Max Notional **≤ 450,000** is **not** 1-CR
 
 Underutilized names with Max Notional **≤ 450,000** do **not** get a reduce-tier action.
 
-## Deploy
+## Deploy (copy-paste into Apps Script)
 
-1. Open the spreadsheet. **Extensions → Apps Script**. Paste [`Code.gs`](Code.gs).
-2. Set `CONFIG.EMAIL_TO`. Optional: copy [`appsscript.json`](appsscript.json) (timezone `Asia/Kolkata`).
-3. Run **`runLeverageCheckNow`** to test. Run **`setupWeeklyTrigger`** once to schedule Monday 8am.
+Do **not** copy from the GitHub file view (that often includes line numbers). Use the raw file:
+
+1. Open this URL: [raw Code.gs](https://raw.githubusercontent.com/adityaarya-byte/Ops_monitoring/cursor/leverage-max-notional-tier-2766/leverage-monitoring/Code.gs)
+2. `Ctrl+A` (or `Cmd+A`) → `Ctrl+C` / `Cmd+C`
+3. In the Google Sheet: **Extensions → Apps Script**. Delete any existing code. `Ctrl+V` / `Cmd+V`. Save.
+4. Set `CONFIG.EMAIL_TO` if needed.
+5. Run **`runLeverageCheckNow`** to test. Run **`setupWeeklyTrigger`** once to schedule Monday 8am.
