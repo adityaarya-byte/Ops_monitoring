@@ -17,6 +17,16 @@ Utilization ≥ 100% on a name with Max Notional **≤ 450,000** is **not** 1-CR
 
 Underutilized names with Max Notional **≤ 450,000** do **not** get a reduce-tier action.
 
+## Ignore / exception list
+
+To keep a token off Live Checks and the email, add it to `CONFIG.IGNORE_SYMBOLS` using the exact symbol from the Outcome sheet:
+
+```javascript
+IGNORE_SYMBOLS: ['BTCUSDT', 'ETHUSDT'],
+```
+
+Matching is case-insensitive (`btcusdt` also works). Leave it as `[]` to include every symbol.
+
 ## Deploy (copy-paste into Apps Script)
 
 Do **not** copy from the GitHub file view (that often includes line numbers). Use the raw file:

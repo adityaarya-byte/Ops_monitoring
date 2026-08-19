@@ -23,7 +23,8 @@ function loadLogic() {
     isAboveNotionalFloor: sandbox.isAboveNotionalFloor,
     mapHeaders: sandbox.mapHeaders,
     evaluateRow: sandbox.evaluateRow,
-    buildSummary: sandbox.buildSummary
+    buildSummary: sandbox.buildSummary,
+    isIgnoredSymbol: sandbox.isIgnoredSymbol
   };
 }
 
@@ -172,6 +173,20 @@ test('buildSummary buckets the new reduce-tier action as underutilized', functio
   assert.strictEqual(summary.critical.length, 1);
   assert.strictEqual(summary.underutilized.length, 1);
   assert.strictEqual(summary.underutilized[0].symbol, 'LOWUSDT');
+});
+
+test('isIgnoredSymbol matches IGNORE_SYMBOLS case-insensitively', function () {
+  var original = logic.CONFIG.IGNORE_SYMBOLS;
+  logic.CONFIG.IGNORE_SYMBOLS = ['BTCUSDT', 'ethusdt'];
+  try {
+    assert.strictEqual(logic.isIgnoredSymbol('BTCUSDT'), true);
+    assert.strictEqual(logic.isIgnoredSymbol('btcusdt'), true);
+    assert.strictEqual(logic.isIgnoredSymbol(' ETHUSDT '), true);
+    assert.strictEqual(logic.isIgnoredSymbol('SOLUSDT'), false);
+    assert.strictEqual(logic.isIgnoredSymbol(''), false);
+  } finally {
+    logic.CONFIG.IGNORE_SYMBOLS = original;
+  }
 });
 
 test('mapHeaders still finds Max Notional to Users', function () {

@@ -36,6 +36,11 @@ var CONFIG = {
   // Underutilized 2 weeks + max notional > this value -> reduce tier on DCX.
   MAX_NOTIONAL_TIER_THRESHOLD: 450000,
 
+  // Tokens to skip entirely (not written to Live Checks, not in the email).
+  // Use the exact symbol from the Outcome sheet. Matching is case-insensitive.
+  // Example: IGNORE_SYMBOLS: ['BTCUSDT', 'ETHUSDT'],
+  IGNORE_SYMBOLS: [],
+
   // Trigger schedule
   TRIGGER_WEEKDAY: ScriptApp.WeekDay.MONDAY,
   TRIGGER_HOUR: 8                        // 8am, in the spreadsheet's timezone
@@ -58,7 +63,9 @@ function runLeverageCheckNow() {
   var rows = data.slice(1).filter(function (r) { return r[0] !== '' && r[0] !== null; });
 
   var colIndex = mapHeaders(headers);
-  var results = rows.map(function (row) { return evaluateRow(row, colIndex); });
+  var results = rows
+    .filter(function (row) { return !isIgnoredSymbol(row[colIndex.symbol]); })
+    .map(function (row) { return evaluateRow(row, colIndex); });
 
   writeLiveChecksSheet(ss, results);
   var summary = buildSummary(results);
@@ -108,6 +115,17 @@ function toNumber(v) {
 
 function isAboveNotionalFloor(maxNotional) {
   return toNumber(maxNotional) > CONFIG.MAX_NOTIONAL_TIER_THRESHOLD;
+}
+
+/** True if this symbol is on CONFIG.IGNORE_SYMBOLS (case-insensitive, trimmed). */
+function isIgnoredSymbol(symbol) {
+  var key = String(symbol == null ? '' : symbol).toLowerCase().trim();
+  if (!key) return false;
+  var list = CONFIG.IGNORE_SYMBOLS || [];
+  for (var i = 0; i < list.length; i++) {
+    if (String(list[i] == null ? '' : list[i]).toLowerCase().trim() === key) return true;
+  }
+  return false;
 }
 
 /** Runs all 4 checks for a single row and returns a result object. */
