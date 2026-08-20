@@ -1,33 +1,35 @@
 # Token Health
 
-Single-file Google Apps Script tracker for token listing / volume / deposit-withdraw health across Binance, KuCoin, and Gate.
+Google Apps Script tracker for listing / volume / chain D1W1 health.
 
-## File
+## D1W1 rule
 
-- `Code.gs` — paste this into Apps Script (entry point: `runAllCryptoTrackers`)
+For each token, for each exchange (KuCoin, Binance, Gate):
 
-## Sheets required
+> If **any** chain has `deposit=Yes` **and** `withdraw=Yes` → that exchange counts as **1**.
 
-| Tab | Purpose |
-|-----|---------|
-| `HEALTH` | Input tokens (A), ecode (B), CMC id (C); outputs price/volume/listing cols D–L |
-| `CHAIN` | Per-chain deposit/withdraw matrix + summary (J–M) |
-| `ALERTS` | Append-only alert history |
-| `Monitoring` | Flattened monitoring export (A–G) |
+Example **GRT**: KuCoin none, Binance ARBITRUM, Gate ETH/ARBEVM → count **2** (`Gate,Binance`).
 
-## Setup
+**CHR** with KuCoin+Binance+Gate all D1W1 somewhere → count **3** → no alert if previous was also 3.
 
-1. Open the Google Sheet → **Extensions → Apps Script**.
-2. Replace the default script with `Code.gs`.
-3. Run `setCmcApiKey()` once after pasting your CMC key into that function (or set Script Property `CMC_API_KEY`).
-4. Create a time-driven trigger on `runAllCryptoTrackers`.
+Asymmetric **D0W1** (deposit NO, withdraw Yes) is shown on CHAIN/Monitoring only — it does **not** trigger alerts (this was the CHR false positive).
 
-## Binance volume reliability
+## Action column (ALERTS col F)
 
-Binance 24h ticker fetches can intermittently fail (timeouts, 418/429/451, empty/non-JSON). Previously that silently wrote volume `0`.
+| Change | Action |
+|--------|--------|
+| 3 → 2 | No action |
+| 2 → 1 | Ask MOC and Fund Ops; add to TPE withdrawal sheet |
+| 1 → 0 | Check funds should be TPE |
+| 1 → 2 | No action |
+| 2 → 3 | Remove from TPE withdrawal sheet |
 
-This script:
+Sheet `TPE withdrawal` is auto-updated for add/remove actions.
 
-- Retries with backoff across multiple Binance hosts
-- Validates HTTP status + JSON array shape
-- Preserves the previous HEALTH Binance volume column when a fresh pull fails
+## Sheets
+
+HEALTH, CHAIN, ALERTS, Monitoring, TPE withdrawal
+
+## Entry point
+
+`runAllCryptoTrackers()`

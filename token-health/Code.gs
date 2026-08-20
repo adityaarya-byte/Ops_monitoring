@@ -1,15 +1,14 @@
 /**
  * Token Health — single-file Google Apps Script
- * Sheets required: HEALTH, CHAIN, ALERTS, Monitoring
+ * Sheets: HEALTH, CHAIN, ALERTS, Monitoring, TPE withdrawal
  *
- * Binance volume fix:
- * - Retries across multiple hosts with HTTP/JSON validation
- * - Preserves previous HEALTH Binance volumes if live ticker pull fails
- *   (avoids wiping good data to 0 on flaky responses)
+ * D1W1 definition (per token):
+ *   For each exchange (KuCoin / Binance / Gate): if ANY chain has
+ *   deposit=Yes AND withdraw=Yes → that exchange counts as 1.
+ *   Active count = 0..3. Example GRT: KuCoin none, Binance ARBITRUM, Gate ETH → 2.
  *
- * Alerts: at most 2 emails per run
- * - Email 1: all exchange coverage drops (combined table)
- * - Email 2: all D1W1 changes (combined table)
+ * Alerts fire when that count changes. ALERTS column F = Action to take.
+ * Asymmetric D0W1 (deposit NO + withdraw Yes) is logged on CHAIN/Monitoring only — no email.
  */
 
 var CONFIG = {
@@ -31,6 +30,7 @@ var CONFIG = {
   GATE_CHAIN_URL: 'https://api.gateio.ws/api/v4/spot/currencies',
   BINANCE_MAX_ATTEMPTS: 3,
   BINANCE_RETRY_SLEEP_MS: 400,
+  TPE_WITHDRAWAL_SHEET: 'TPE withdrawal',
   ALERT_RECIPIENTS: [
     'aditya.arya@coindcx.com',
     'abdul.khan@coindcx.com',
@@ -75,10 +75,14 @@ function runAllCryptoTrackers() {
   var chainSheet = ss.getSheetByName('CHAIN');
   var alertsSheet = ss.getSheetByName('ALERTS');
   var monitoringSheet = ss.getSheetByName('Monitoring');
+  var tpeSheet = ss.getSheetByName(CONFIG.TPE_WITHDRAWAL_SHEET);
 
   if (!healthSheet || !chainSheet || !alertsSheet || !monitoringSheet) {
     Logger.log("❌ Configuration Error: Please ensure tabs named 'HEALTH', 'CHAIN', 'ALERTS', and 'Monitoring' all exist.");
     return;
+  }
+  if (!tpeSheet) {
+    Logger.log("⚠️ Sheet '" + CONFIG.TPE_WITHDRAWAL_SHEET + "' not found — add/remove TPE actions will be skipped.");
   }
 
   var healthLastRow = healthSheet.getLastRow();
@@ -88,35 +92,19 @@ function runAllCryptoTrackers() {
   }
 
   // =========================================================
-  // PHASE 1: SNAPSHOT PREVIOUS DAY'S STATS FROM 'CHAIN' TAB
+  // PHASE 1: SNAPSHOT PREVIOUS D1W1 COUNTS FROM CHAIN SUMMARY
+  // Summary cols J–L: token | D1W1 exchanges | count
   // =========================================================
   var chainLastRow = chainSheet.getLastRow();
-  var previousExchangeCounts = {};
-  var previousD1W1Chains = {};
   var previousD1W1Counts = {};
 
   if (chainLastRow >= 2) {
-    var fullChainData = chainSheet.getRange(2, 1, chainLastRow - 1, 13).getValues();
-
-    fullChainData.forEach(function (row) {
-      var summaryTok = row[9] ? String(row[9]).trim().toUpperCase() : '';
+    var summarySnap = chainSheet.getRange(2, 10, chainLastRow - 1, 3).getValues(); // J–L
+    summarySnap.forEach(function (row) {
+      var summaryTok = row[0] ? String(row[0]).trim().toUpperCase() : '';
       if (!summaryTok) return;
-
-      var cnt = row[11] !== '' ? parseInt(row[11], 10) : 0;
-      previousExchangeCounts[summaryTok] = cnt;
-
-      var d1w1String = row[12] ? String(row[12]).trim() : '';
-      previousD1W1Counts[summaryTok] = d1w1String ? d1w1String.split(',').length : 0;
-    });
-
-    fullChainData.forEach(function (row) {
-      var matrixTok = row[0] ? String(row[0]).trim().toUpperCase() : '';
-      var chn = row[1] ? String(row[1]).trim().toUpperCase() : '';
-      if (!matrixTok) return;
-
-      if (row[2] === 'NO' && row[3] === 'Yes') previousD1W1Chains[matrixTok + '_KUCOIN_' + chn] = true;
-      if (row[4] === 'NO' && row[5] === 'Yes') previousD1W1Chains[matrixTok + '_BINANCE_' + chn] = true;
-      if (row[6] === 'NO' && row[7] === 'Yes') previousD1W1Chains[matrixTok + '_GATE_' + chn] = true;
+      var cnt = row[2] !== '' && !isNaN(row[2]) ? parseInt(row[2], 10) : 0;
+      previousD1W1Counts[summaryTok] = cnt;
     });
   }
 
@@ -295,11 +283,22 @@ function runAllCryptoTrackers() {
         kChainJson.data.forEach(function (coin) {
           var token = String(coin.currency || '').toUpperCase();
           kucoinListedSet.add(token);
-          if (targetTokens.has(token)) {
-            kucoinGlobalStatus[token] = {
-              deposit: coin.isDepositEnabled ? 'Yes' : 'NO',
-              withdraw: coin.isWithdrawEnabled ? 'Yes' : 'NO'
-            };
+          if (!targetTokens.has(token)) return;
+
+          var globalDep = coin.isDepositEnabled ? 'Yes' : 'NO';
+          var globalWd = coin.isWithdrawEnabled ? 'Yes' : 'NO';
+          kucoinGlobalStatus[token] = { deposit: globalDep, withdraw: globalWd };
+
+          // Prefer per-chain flags when KuCoin provides them
+          if (coin.chains && Array.isArray(coin.chains) && coin.chains.length > 0) {
+            coin.chains.forEach(function (c) {
+              var chainName = c.chainName || c.chain || c.chainId || 'MAINNET';
+              var r = initTokenChain(token, chainName);
+              r.kucoin_deposit = (typeof c.isDepositEnabled === 'boolean')
+                ? (c.isDepositEnabled ? 'Yes' : 'NO') : globalDep;
+              r.kucoin_withdraw = (typeof c.isWithdrawEnabled === 'boolean')
+                ? (c.isWithdrawEnabled ? 'Yes' : 'NO') : globalWd;
+            });
           }
         });
       }
@@ -354,8 +353,10 @@ function runAllCryptoTrackers() {
   var healthOutput = [];
   var monitoringOutput = [];
 
-  monitoringSheet.getRange('A1:G1').setValues([[
-    'target_currency', 'ecode', 'cmc_id', 'cmc_rank', 'Binance(Y/N)', 'KuCoin (Y/N)', 'Gate(Y/N)'
+  monitoringSheet.getRange('A1:J1').setValues([[
+    'target_currency', 'ecode', 'cmc_id', 'cmc_rank',
+    'Binance(Y/N)', 'KuCoin (Y/N)', 'Gate(Y/N)',
+    'Active on TPE', 'Chain Exchange D1W1', 'Chain exchange D0W1'
   ]]).setFontWeight('bold');
 
   for (var i = 0; i < tokenValues.length; i++) {
@@ -405,6 +406,7 @@ function runAllCryptoTrackers() {
       gateListed
     ]);
 
+    // H–J filled after chain D1W1 maps are built
     monitoringOutput.push([
       rawToken, rawEcode, rawCmcId, cmcRank, binanceListed, kucoinListed, gateListed
     ]);
@@ -415,26 +417,26 @@ function runAllCryptoTrackers() {
 
   var monitoringMaxRows = monitoringSheet.getMaxRows();
   if (monitoringMaxRows > 1) {
-    monitoringSheet.getRange(2, 1, monitoringMaxRows - 1, 7).clearContent();
+    monitoringSheet.getRange(2, 1, monitoringMaxRows - 1, 10).clearContent();
   }
+  // A–G written now; H–J after Phase 6
   monitoringSheet.getRange(2, 1, monitoringOutput.length, 7).setValues(monitoringOutput);
-  Logger.log('📊 Monitoring Columns A through G updated cleanly with active codes.');
 
   // =========================================================
-  // PHASE 6: EXECUTE CHAIN PROCESSING
+  // PHASE 6: CHAIN MATRIX + TRUE D1W1 COUNT (any-chain D+W Yes)
   // =========================================================
   var chainHeaders = [['token', 'chain', 'kucoin_deposit', 'kucoin_withdraw', 'binance_deposit', 'binance_withdraw', 'gate_deposit', 'gate_withdraw']];
   var chainOutputRows = [];
   var sortedTokens = Array.from(targetTokens).sort();
 
-  var liveTokenExchangeMap = {};
+  // D1W1 = deposit Yes AND withdraw Yes on at least one chain for that exchange
   var d1w1ExchangeMap = {};
-  var brokenD1W1Targets = {};
+  // D0W1 = deposit NO AND withdraw Yes (info only — does NOT alert)
+  var d0w1ExchangeMap = {};
 
   sortedTokens.forEach(function (token) {
-    liveTokenExchangeMap[token] = new Set();
     d1w1ExchangeMap[token] = new Set();
-    brokenD1W1Targets[token] = [];
+    d0w1ExchangeMap[token] = new Set();
   });
 
   sortedTokens.forEach(function (token) {
@@ -445,23 +447,22 @@ function runAllCryptoTrackers() {
       var chains = Object.keys(masterChainMap[token]).sort();
       chains.forEach(function (chain) {
         var data = masterChainMap[token][chain];
-        if (kcData) {
+
+        // KuCoin: use per-chain flags if set by API; else paint global onto the row for display
+        if (kcData && data.kucoin_deposit === 'NO' && data.kucoin_withdraw === 'NO') {
           data.kucoin_deposit = kcData.deposit;
           data.kucoin_withdraw = kcData.withdraw;
         }
 
-        if (data.kucoin_deposit === 'Yes' && data.kucoin_withdraw === 'Yes') liveTokenExchangeMap[token].add('KuCoin');
-        if (data.binance_deposit === 'Yes' && data.binance_withdraw === 'Yes') liveTokenExchangeMap[token].add('Binance');
-        if (data.gate_deposit === 'Yes' && data.gate_withdraw === 'Yes') liveTokenExchangeMap[token].add('Gate');
+        // TRUE D1W1: deposit Yes AND withdraw Yes on this chain → exchange counts as 1 for the token
+        if (data.kucoin_deposit === 'Yes' && data.kucoin_withdraw === 'Yes') d1w1ExchangeMap[token].add('KuCoin');
+        if (data.binance_deposit === 'Yes' && data.binance_withdraw === 'Yes') d1w1ExchangeMap[token].add('Binance');
+        if (data.gate_deposit === 'Yes' && data.gate_withdraw === 'Yes') d1w1ExchangeMap[token].add('Gate');
 
-        if (data.kucoin_deposit === 'NO' && data.kucoin_withdraw === 'Yes') d1w1ExchangeMap[token].add('KuCoin');
-        else if (previousD1W1Chains[token + '_KUCOIN_' + chain]) brokenD1W1Targets[token].push('KuCoin (' + chain + ')');
-
-        if (data.binance_deposit === 'NO' && data.binance_withdraw === 'Yes') d1w1ExchangeMap[token].add('Binance');
-        else if (previousD1W1Chains[token + '_BINANCE_' + chain]) brokenD1W1Targets[token].push('Binance (' + chain + ')');
-
-        if (data.gate_deposit === 'NO' && data.gate_withdraw === 'Yes') d1w1ExchangeMap[token].add('Gate');
-        else if (previousD1W1Chains[token + '_GATE_' + chain]) brokenD1W1Targets[token].push('Gate (' + chain + ')');
+        // D0W1 info only (does not drive alerts)
+        if (data.kucoin_deposit === 'NO' && data.kucoin_withdraw === 'Yes') d0w1ExchangeMap[token].add('KuCoin');
+        if (data.binance_deposit === 'NO' && data.binance_withdraw === 'Yes') d0w1ExchangeMap[token].add('Binance');
+        if (data.gate_deposit === 'NO' && data.gate_withdraw === 'Yes') d0w1ExchangeMap[token].add('Gate');
 
         chainOutputRows.push([
           token, chain,
@@ -472,15 +473,21 @@ function runAllCryptoTrackers() {
       });
     } else if (kcData) {
       var mainnetStr = 'MAINNET';
-      if (kcData.deposit === 'Yes' && kcData.withdraw === 'Yes') liveTokenExchangeMap[token].add('KuCoin');
-
-      if (kcData.deposit === 'NO' && kcData.withdraw === 'Yes') d1w1ExchangeMap[token].add('KuCoin');
-      else if (previousD1W1Chains[token + '_KUCOIN_' + mainnetStr]) brokenD1W1Targets[token].push('KuCoin (' + mainnetStr + ')');
-
+      if (kcData.deposit === 'Yes' && kcData.withdraw === 'Yes') d1w1ExchangeMap[token].add('KuCoin');
+      if (kcData.deposit === 'NO' && kcData.withdraw === 'Yes') d0w1ExchangeMap[token].add('KuCoin');
       chainOutputRows.push([token, mainnetStr, kcData.deposit, kcData.withdraw, 'NO', 'NO', 'NO', 'NO']);
     } else {
       chainOutputRows.push([token, 'NOT FOUND', 'NO', 'NO', 'NO', 'NO', 'NO', 'NO']);
     }
+  });
+
+  // Sort chain rows for stable output
+  chainOutputRows.sort(function (a, b) {
+    if (a[0] < b[0]) return -1;
+    if (a[0] > b[0]) return 1;
+    if (a[1] < b[1]) return -1;
+    if (a[1] > b[1]) return 1;
+    return 0;
   });
 
   chainSheet.clearContents();
@@ -490,159 +497,195 @@ function runAllCryptoTrackers() {
   }
 
   // =========================================================
-  // PHASE 7: HEADER CALCULATIONS & BATCHED EMAIL ALERTS
-  // At most 2 emails: (1) coverage drops  (2) D1W1 changes
+  // PHASE 7: D1W1 SUMMARY + ALERTS WITH ACTION + TPE SHEET
   // =========================================================
-  chainSheet.getRange('J1:M1').setValues([['token', 'D1W1 exchange', 'Exchange no', 'D1W1']]).setFontWeight('bold');
+  chainSheet.getRange('J1:M1').setValues([[
+    'token', 'D1W1 exchange', 'Exchange no', 'D0W1 exchange'
+  ]]).setFontWeight('bold');
 
   var summaryOutput = [];
   var incomingAlertsList = [];
-  var coverageAlertRows = []; // batched email #1
-  var d1w1AlertRows = [];     // batched email #2
+  var d1w1AlertRows = [];
   var timestampString = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd HH:mm');
+  var monitoringHij = []; // Active on TPE | D1W1 list | D0W1 list — same order as tokenValues
+
+  // Precompute maps for monitoring row order
+  for (var mi = 0; mi < tokenValues.length; mi++) {
+    var mt = tokenValues[mi];
+    if (!mt) {
+      monitoringHij.push(['', '', '']);
+      continue;
+    }
+    var mSet = d1w1ExchangeMap[mt] || new Set();
+    var m0 = d0w1ExchangeMap[mt] || new Set();
+    monitoringHij.push([
+      mSet.size,
+      Array.from(mSet).join(',') || '',
+      Array.from(m0).join(',') || ''
+    ]);
+  }
+  if (monitoringHij.length > 0) {
+    monitoringSheet.getRange(2, 8, monitoringHij.length, 3).setValues(monitoringHij);
+  }
+  Logger.log('📊 Monitoring H–J (Active on TPE / D1W1 / D0W1) updated.');
 
   sortedTokens.forEach(function (token) {
     if (!targetTokens.has(token)) return;
 
-    var exchangeSet = liveTokenExchangeMap[token];
+    var exchangeSet = d1w1ExchangeMap[token] || new Set();
     var liveExchangeList = Array.from(exchangeSet).join(',');
     var liveCount = exchangeSet.size;
+    var d0List = Array.from(d0w1ExchangeMap[token] || []).join(',');
 
-    var d1w1Set = d1w1ExchangeMap[token];
-    var d1w1List = Array.from(d1w1Set).join(',');
-    var liveD1w1Count = d1w1Set.size;
+    summaryOutput.push([token, liveExchangeList || '', liveCount, d0List || '']);
 
-    summaryOutput.push([token, liveExchangeList || '', liveCount, d1w1List || '']);
+    // Alert only when true D1W1 exchange-count changes
+    if (!previousD1W1Counts.hasOwnProperty(token)) return;
+    var pastCount = previousD1W1Counts[token];
+    if (liveCount === pastCount) return;
 
-    if (previousExchangeCounts.hasOwnProperty(token)) {
-      var pastCount = previousExchangeCounts[token];
-      if (liveCount < pastCount) {
-        var alertString = 'Token [' + token + '] coverage degraded from ' + pastCount +
-          ' to ' + liveCount + '. Live Active: (' + (liveExchangeList || 'None') + ')';
-        incomingAlertsList.push([timestampString, token, pastCount, liveCount, alertString]);
-        coverageAlertRows.push({
-          token: token,
-          pastCount: pastCount,
-          liveCount: liveCount,
-          liveExchangeList: liveExchangeList || 'None',
-          message: alertString
-        });
-      }
-    }
+    var action = getD1W1Action_(pastCount, liveCount);
+    var direction = liveCount < pastCount ? 'DROP' : 'INCREASE';
+    var alertString = 'Token [' + token + '] D1W1 ' +
+      (direction === 'DROP' ? 'dropped' : 'increased') +
+      ' from ' + pastCount + ' to ' + liveCount +
+      '. Active D1W1 exchanges: (' + (liveExchangeList || 'None') + ')';
 
-    if (previousD1W1Counts.hasOwnProperty(token)) {
-      var pastD1w1Count = previousD1W1Counts[token];
+    // ALERTS: Date | Token | Prev | Curr | Message | Action
+    incomingAlertsList.push([
+      timestampString, token, pastCount, liveCount, alertString, action
+    ]);
 
-      if (liveD1w1Count !== pastD1w1Count) {
-        var d1AlertString = '';
-        var direction = '';
-        var targetString = '';
+    d1w1AlertRows.push({
+      token: token,
+      direction: direction,
+      pastCount: pastCount,
+      liveCount: liveCount,
+      liveExchangeList: liveExchangeList || 'None',
+      action: action,
+      message: alertString
+    });
 
-        if (liveD1w1Count < pastD1w1Count) {
-          direction = 'DROP';
-          targetString = brokenD1W1Targets[token].length > 0 ? brokenD1W1Targets[token].join(', ') : 'Unknown';
-          d1AlertString = 'Token [' + token + '] (D1W1) dropped from ' + pastD1w1Count +
-            ' to ' + liveD1w1Count + '. Disabled D1W1 Status ' + targetString +
-            '. Current D1W1 Exchanges left active: (' + (d1w1List || 'None') + ')';
-        } else {
-          direction = 'INCREASE';
-          targetString = d1w1List || 'None';
-          d1AlertString = 'Token [' + token + '] (D1W1) increased from ' + pastD1w1Count +
-            ' to ' + liveD1w1Count + '. New D1W1 Active Status verified. Current D1W1 Exchanges: (' +
-            (d1w1List || 'None') + ')';
-        }
-
-        incomingAlertsList.push([timestampString, token, pastD1w1Count, liveD1w1Count, d1AlertString]);
-        d1w1AlertRows.push({
-          token: token,
-          direction: direction,
-          pastCount: pastD1w1Count,
-          liveCount: liveD1w1Count,
-          targetString: targetString,
-          message: d1AlertString
-        });
-      }
-    }
+    // Auto TPE sheet mutations from action text
+    applyTpeSheetAction_(tpeSheet, token, action, timestampString);
   });
 
   if (summaryOutput.length > 0) {
     chainSheet.getRange(2, 10, summaryOutput.length, 4).setValues(summaryOutput);
   }
 
-  // Send at most 2 combined emails (not one per token)
-  if (coverageAlertRows.length > 0) {
-    sendBatchedCoverageEmail_(timestampString, coverageAlertRows);
-  }
   if (d1w1AlertRows.length > 0) {
-    sendBatchedD1W1Email_(timestampString, d1w1AlertRows);
+    sendBatchedD1W1ActionEmail_(timestampString, d1w1AlertRows);
   }
 
   // =========================================================
-  // PHASE 8: COMMIT STRUCTURAL ANOMALIES TO "ALERTS" TAB
+  // PHASE 8: ALERTS TAB (with Action column)
   // =========================================================
-  if (alertsSheet.getLastRow() === 0) {
-    alertsSheet.appendRow([
-      'Date/Time Verified', 'Token Symbol', 'Previous Count', 'Current Count', 'Detailed Status Alert Message'
-    ]);
-    alertsSheet.getRange('A1:E1').setFontWeight('bold');
-  }
-
+  ensureD1W1AlertsHeader_(alertsSheet);
   if (incomingAlertsList.length > 0) {
-    alertsSheet.getRange(alertsSheet.getLastRow() + 1, 1, incomingAlertsList.length, 5).setValues(incomingAlertsList);
+    alertsSheet
+      .getRange(alertsSheet.getLastRow() + 1, 1, incomingAlertsList.length, 6)
+      .setValues(incomingAlertsList);
   }
 
-  Logger.log('✅ runAllCryptoTrackers finished.');
+  Logger.log('✅ runAllCryptoTrackers finished. D1W1 alerts: ' + d1w1AlertRows.length);
 }
 
 // =========================================================
-// BATCHED EMAIL HELPERS (max 2 emails per run)
+// D1W1 ACTION + TPE SHEET + EMAIL HELPERS
 // =========================================================
 
-function sendBatchedCoverageEmail_(timestampString, rows) {
-  var tokenList = rows.map(function (r) { return r.token; }).join(', ');
-  var tableRows = '';
+/**
+ * Action rules:
+ *  3 → 2 : No action
+ *  2 → 1 : Ask MOC and Fund Ops; add to TPE withdrawal sheet
+ *  1 → 0 : Check funds should be TPE
+ *  1 → 2 : No action
+ *  2 → 3 : Remove from TPE withdrawal sheet
+ * Other transitions use closest matching rule.
+ */
+function getD1W1Action_(prev, curr) {
+  prev = Number(prev);
+  curr = Number(curr);
+  if (prev === curr) return 'No action';
 
-  rows.forEach(function (r, idx) {
-    tableRows +=
-      '<tr style="background-color:' + (idx % 2 === 0 ? '#111827' : '#0B1220') + ';">' +
-      '<td style="padding: 10px 8px; border-bottom: 1px solid #1A202C; font-weight: bold; color: #fb923c;">' + r.token + '</td>' +
-      '<td style="padding: 10px 8px; border-bottom: 1px solid #1A202C; color: #a855f7; text-align: center;">' + r.pastCount + '</td>' +
-      '<td style="padding: 10px 8px; border-bottom: 1px solid #1A202C; color: #ff4d4d; text-align: center; font-weight: bold;">' + r.liveCount + '</td>' +
-      '<td style="padding: 10px 8px; border-bottom: 1px solid #1A202C; color: #e2e8f0;">' + r.liveExchangeList + '</td>' +
-      '<td style="padding: 10px 8px; border-bottom: 1px solid #1A202C; color: #fecdd3; font-size: 12px;">' + r.message + '</td>' +
-      '</tr>';
-  });
+  if (curr < prev) {
+    if (prev === 3 && curr === 2) return 'No action';
+    if (curr === 1) return 'Ask MOC and Fund Ops; add to TPE withdrawal sheet';
+    if (curr === 0) return 'Check funds should be TPE';
+    return 'No action';
+  }
 
-  var htmlBody =
-    '<div style="font-family: \'Courier New\', Courier, monospace; max-width: 900px; background-color: #0B1220; border: 2px solid #ff4d4d; padding: 20px; border-radius: 4px; color: #ffffff;">' +
-    '<h2 style="color: #ff4d4d; margin-top: 0; font-size: 20px; border-bottom: 1px solid #ff4d4d; padding-bottom: 10px; letter-spacing: 1px;">🚨 COVERAGE DEGRADATION ALERT (' + rows.length + ' token' + (rows.length > 1 ? 's' : '') + ')</h2>' +
-    '<p style="color: #94a3b8; font-size: 13px; margin: 8px 0 16px;">Date/Time Verified: <span style="color:#38bdf8;font-weight:bold;">' + timestampString + '</span></p>' +
-    '<table style="width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; color: #e2e8f0;">' +
-    '<thead><tr style="background-color:#1A202C;">' +
-    '<th style="padding: 10px 8px; text-align: left; color: #94a3b8;">Token</th>' +
-    '<th style="padding: 10px 8px; text-align: center; color: #94a3b8;">Prev</th>' +
-    '<th style="padding: 10px 8px; text-align: center; color: #94a3b8;">Curr</th>' +
-    '<th style="padding: 10px 8px; text-align: left; color: #94a3b8;">Live Active</th>' +
-    '<th style="padding: 10px 8px; text-align: left; color: #94a3b8;">Details</th>' +
-    '</tr></thead><tbody>' + tableRows + '</tbody></table>' +
-    '<hr style="border: 0; border-top: 1px solid #1A202C; margin: 20px 0;">' +
-    '<p style="font-size: 11px; color: #4a5568; text-align: center; margin-bottom: 0;">Automated Transmission // CoinDCX Operations Command Center Tracking Engine</p>' +
-    '</div>';
+  // increasing
+  if (curr === 3 && prev === 2) return 'Remove from TPE withdrawal sheet';
+  if (curr === 3 && prev < 3) return 'Remove from TPE withdrawal sheet';
+  return 'No action';
+}
 
-  try {
-    MailApp.sendEmail({
-      to: CONFIG.ALERT_RECIPIENTS.join(','),
-      subject: '🚨 CRITICAL: Coverage Degraded — ' + rows.length + ' token' + (rows.length > 1 ? 's' : '') + ' [' + tokenList + ']',
-      htmlBody: htmlBody,
-      name: 'Token Health Chain Metrix'
-    });
-    Logger.log('📧 Sent batched coverage email for ' + rows.length + ' token(s).');
-  } catch (mailErr) {
-    Logger.log('❌ Batched coverage mail failed: ' + mailErr);
+function ensureD1W1AlertsHeader_(alertsSheet) {
+  var headers = [
+    'Date/Time Verified', 'Token Symbol', 'Previous Count', 'Current Count',
+    'Detailed Status Alert Message', 'Action'
+  ];
+  if (alertsSheet.getLastRow() === 0) {
+    alertsSheet.appendRow(headers);
+    alertsSheet.getRange(1, 1, 1, 6).setFontWeight('bold');
+    return;
+  }
+  var current = alertsSheet.getRange(1, 1, 1, 6).getValues()[0];
+  if (String(current[5] || '').toLowerCase().indexOf('action') === -1) {
+    // Ensure Action header in column F without wiping history
+    alertsSheet.getRange(1, 6).setValue('Action').setFontWeight('bold');
+    if (String(current[0]).indexOf('Date') === -1) {
+      alertsSheet.insertRowBefore(1);
+      alertsSheet.getRange(1, 1, 1, 6).setValues([headers]).setFontWeight('bold');
+    }
   }
 }
 
-function sendBatchedD1W1Email_(timestampString, rows) {
+function applyTpeSheetAction_(tpeSheet, token, action, timestampString) {
+  if (!tpeSheet || !token || !action) return;
+  var a = String(action).toLowerCase();
+
+  if (a.indexOf('add to tpe') !== -1) {
+    addTokenToTpeSheet_(tpeSheet, token, timestampString);
+  } else if (a.indexOf('remove from tpe') !== -1) {
+    removeTokenFromTpeSheet_(tpeSheet, token);
+  }
+}
+
+function addTokenToTpeSheet_(tpeSheet, token, timestampString) {
+  var lastRow = tpeSheet.getLastRow();
+  if (lastRow >= 1) {
+    var colA = tpeSheet.getRange(1, 1, lastRow, 1).getValues();
+    for (var i = 0; i < colA.length; i++) {
+      if (String(colA[i][0]).trim().toUpperCase() === token) {
+        Logger.log('TPE: ' + token + ' already on sheet — skip add.');
+        return;
+      }
+    }
+  }
+  if (lastRow === 0) {
+    tpeSheet.appendRow(['Token', 'Added At', 'Source']);
+    tpeSheet.getRange(1, 1, 1, 3).setFontWeight('bold');
+  }
+  tpeSheet.appendRow([token, timestampString, 'Token Health D1W1 alert']);
+  Logger.log('TPE: added ' + token);
+}
+
+function removeTokenFromTpeSheet_(tpeSheet, token) {
+  var lastRow = tpeSheet.getLastRow();
+  if (lastRow < 1) return;
+  var colA = tpeSheet.getRange(1, 1, lastRow, 1).getValues();
+  for (var i = colA.length - 1; i >= 0; i--) {
+    if (String(colA[i][0]).trim().toUpperCase() === token) {
+      tpeSheet.deleteRow(i + 1);
+      Logger.log('TPE: removed ' + token + ' from row ' + (i + 1));
+    }
+  }
+}
+
+function sendBatchedD1W1ActionEmail_(timestampString, rows) {
   var tokenList = rows.map(function (r) { return r.token; }).join(', ');
   var dropCount = 0;
   var increaseCount = 0;
@@ -653,52 +696,52 @@ function sendBatchedD1W1Email_(timestampString, rows) {
     else increaseCount++;
 
     var dirColor = r.direction === 'DROP' ? '#fb923c' : '#10b981';
-    var msgColor = r.direction === 'DROP' ? '#fecdd3' : '#e6f4ea';
+    var bg = idx % 2 === 0 ? '#111827' : '#0B1220';
 
     tableRows +=
-      '<tr style="background-color:' + (idx % 2 === 0 ? '#111827' : '#0B1220') + ';">' +
-      '<td style="padding: 10px 8px; border-bottom: 1px solid #1A202C; font-weight: bold; color: #fb923c;">' + r.token + '</td>' +
-      '<td style="padding: 10px 8px; border-bottom: 1px solid #1A202C; color: ' + dirColor + '; font-weight: bold; text-align: center;">' + r.direction + '</td>' +
-      '<td style="padding: 10px 8px; border-bottom: 1px solid #1A202C; color: #a855f7; text-align: center;">' + r.pastCount + '</td>' +
-      '<td style="padding: 10px 8px; border-bottom: 1px solid #1A202C; color: ' + dirColor + '; text-align: center; font-weight: bold;">' + r.liveCount + '</td>' +
-      '<td style="padding: 10px 8px; border-bottom: 1px solid #1A202C; color: #e2e8f0;">' + r.targetString + '</td>' +
-      '<td style="padding: 10px 8px; border-bottom: 1px solid #1A202C; color: ' + msgColor + '; font-size: 12px;">' + r.message + '</td>' +
+      '<tr style="background-color:' + bg + ';">' +
+      '<td style="padding:10px 8px;border-bottom:1px solid #1A202C;font-weight:bold;color:#fb923c;">' + r.token + '</td>' +
+      '<td style="padding:10px 8px;border-bottom:1px solid #1A202C;color:' + dirColor + ';font-weight:bold;text-align:center;">' + r.direction + '</td>' +
+      '<td style="padding:10px 8px;border-bottom:1px solid #1A202C;color:#a855f7;text-align:center;">' + r.pastCount + '</td>' +
+      '<td style="padding:10px 8px;border-bottom:1px solid #1A202C;color:' + dirColor + ';text-align:center;font-weight:bold;">' + r.liveCount + '</td>' +
+      '<td style="padding:10px 8px;border-bottom:1px solid #1A202C;color:#e2e8f0;">' + r.liveExchangeList + '</td>' +
+      '<td style="padding:10px 8px;border-bottom:1px solid #1A202C;color:#fde68a;font-weight:bold;">' + r.action + '</td>' +
       '</tr>';
   });
 
   var borderColor = dropCount > 0 ? '#fb923c' : '#10b981';
-  var titleColor = dropCount > 0 ? '#fb923c' : '#10b981';
-
   var htmlBody =
-    '<div style="font-family: \'Courier New\', Courier, monospace; max-width: 950px; background-color: #0B1220; border: 2px solid ' + borderColor + '; padding: 20px; border-radius: 4px; color: #ffffff;">' +
-    '<h2 style="color: ' + titleColor + '; margin-top: 0; font-size: 20px; border-bottom: 1px solid ' + borderColor + '; padding-bottom: 10px; letter-spacing: 1px;">📡 D1W1 STATUS CHANGES (' + rows.length + ' token' + (rows.length > 1 ? 's' : '') + ')</h2>' +
-    '<p style="color: #94a3b8; font-size: 13px; margin: 8px 0 16px;">Date/Time Verified: <span style="color:#38bdf8;font-weight:bold;">' + timestampString + '</span>' +
-    ' &nbsp;|&nbsp; Drops: <span style="color:#fb923c;font-weight:bold;">' + dropCount + '</span>' +
-    ' &nbsp;|&nbsp; Increases: <span style="color:#10b981;font-weight:bold;">' + increaseCount + '</span></p>' +
-    '<table style="width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; color: #e2e8f0;">' +
+    '<div style="font-family:\'Courier New\',Courier,monospace;max-width:980px;background-color:#0B1220;border:2px solid ' + borderColor + ';padding:20px;border-radius:4px;color:#ffffff;">' +
+    '<h2 style="color:' + borderColor + ';margin-top:0;font-size:20px;border-bottom:1px solid ' + borderColor + ';padding-bottom:10px;">' +
+    'D1W1 Exchange Count Changes (' + rows.length + ')</h2>' +
+    '<p style="color:#94a3b8;font-size:13px;margin:8px 0 12px;">Verified: <span style="color:#38bdf8;font-weight:bold;">' + timestampString + '</span>' +
+    ' | Drops: <span style="color:#fb923c;font-weight:bold;">' + dropCount + '</span>' +
+    ' | Increases: <span style="color:#10b981;font-weight:bold;">' + increaseCount + '</span></p>' +
+    '<p style="color:#cbd5e1;font-size:12px;margin:0 0 14px;">Count = how many exchanges have Deposit+Withdraw both ON on at least one chain.</p>' +
+    '<table style="width:100%;border-collapse:collapse;font-size:13px;color:#e2e8f0;">' +
     '<thead><tr style="background-color:#1A202C;">' +
-    '<th style="padding: 10px 8px; text-align: left; color: #94a3b8;">Token</th>' +
-    '<th style="padding: 10px 8px; text-align: center; color: #94a3b8;">Direction</th>' +
-    '<th style="padding: 10px 8px; text-align: center; color: #94a3b8;">Prev</th>' +
-    '<th style="padding: 10px 8px; text-align: center; color: #94a3b8;">Curr</th>' +
-    '<th style="padding: 10px 8px; text-align: left; color: #94a3b8;">Target / Active</th>' +
-    '<th style="padding: 10px 8px; text-align: left; color: #94a3b8;">Details</th>' +
+    '<th style="padding:10px 8px;text-align:left;color:#94a3b8;">Token</th>' +
+    '<th style="padding:10px 8px;text-align:center;color:#94a3b8;">Dir</th>' +
+    '<th style="padding:10px 8px;text-align:center;color:#94a3b8;">Prev</th>' +
+    '<th style="padding:10px 8px;text-align:center;color:#94a3b8;">Curr</th>' +
+    '<th style="padding:10px 8px;text-align:left;color:#94a3b8;">Active D1W1</th>' +
+    '<th style="padding:10px 8px;text-align:left;color:#94a3b8;">Action</th>' +
     '</tr></thead><tbody>' + tableRows + '</tbody></table>' +
-    '<hr style="border: 0; border-top: 1px solid #1A202C; margin: 20px 0;">' +
-    '<p style="font-size: 11px; color: #4a5568; text-align: center; margin-bottom: 0;">Automated Transmission // CoinDCX Operations Command Center Tracking Engine</p>' +
+    '<hr style="border:0;border-top:1px solid #1A202C;margin:20px 0;">' +
+    '<p style="font-size:11px;color:#4a5568;text-align:center;margin:0;">CoinDCX Operations // Token Health</p>' +
     '</div>';
 
-  var subjectPrefix = dropCount > 0 ? '🚨 NOTICE' : '🟢 NOTICE';
   try {
     MailApp.sendEmail({
       to: CONFIG.ALERT_RECIPIENTS.join(','),
-      subject: subjectPrefix + ': D1W1 Status Changes — ' + rows.length + ' token' + (rows.length > 1 ? 's' : '') + ' [' + tokenList + ']',
+      subject: (dropCount > 0 ? '🚨' : '🟢') + ' D1W1 count changes — ' + rows.length +
+        ' token' + (rows.length > 1 ? 's' : '') + ' [' + tokenList + ']',
       htmlBody: htmlBody,
       name: 'Token Health Chain Metrix'
     });
-    Logger.log('📧 Sent batched D1W1 email for ' + rows.length + ' token(s).');
+    Logger.log('📧 D1W1 action email sent (' + rows.length + ').');
   } catch (mailErr) {
-    Logger.log('❌ Batched D1W1 mail failed: ' + mailErr);
+    Logger.log('❌ D1W1 action email failed: ' + mailErr);
   }
 }
 
