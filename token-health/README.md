@@ -1,9 +1,16 @@
 # Token Health
 
-## Alerts → Slack `#token-health-alerts`
+## Alerts → Slack Incoming Webhook
 
-One Slack message **per token** (not batched). Format:
+One message **per token**. No bot `chat:write` scope needed.
 
+### Setup
+1. Create Incoming Webhook for `#token-health-alerts` (URL starts with `https://hooks.slack.com/services/...`)
+2. In Apps Script, either:
+   - Paste URL into `setSlackWebhookUrl()` and **Run** once, or
+   - Script Properties → `SLACK_WEBHOOK_URL` = your webhook URL
+
+### Format
 ```
 GRT | D1W1 : 2→1 | Current Active: Gate
 Action: Ask MOC and Fund Ops; add to TPE withdrawal sheet
@@ -11,20 +18,7 @@ Verified: 2026-08-21 14:55 IST
 ```
 
 ### Skipped
-- **3 → 2** (no Slack, no ALERTS row)
-- **USDT** / **USDC**
-
-### Setup Slack bot token
-1. Invite bot to `#token-health-alerts`
-2. Apps Script → paste token into `setSlackBotToken()` → Run once  
-   Or Script Properties: `SLACK_BOT_TOKEN` = `xoxb-...`, `SLACK_CHANNEL_ID` = `C0BRWAFT24C`
-
-### Action rules
-| Change | Action |
-|--------|--------|
-| 2 → 1 | Ask MOC and Fund Ops; add to TPE withdrawal sheet |
-| 1 → 0 | Check funds should be TPE |
-| 1 → 2 | No action |
-| 2 → 3 | Remove from TPE withdrawal sheet |
+- 3 → 2
+- USDT / USDC
 
 Entry point: `runAllCryptoTrackers()`

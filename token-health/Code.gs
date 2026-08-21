@@ -6,7 +6,7 @@
  *
  * Alerts → Slack #token-health-alerts (one message per token, not batched).
  * Skip: 3→2, USDT, USDC.
- * Script Properties: SLACK_BOT_TOKEN (xoxb-...), SLACK_CHANNEL_ID (default C0BRWAFT24C)
+ * Script Property: SLACK_WEBHOOK_URL = https://hooks.slack.com/services/...
  */
 
 var CONFIG = {
@@ -29,9 +29,8 @@ var CONFIG = {
   BINANCE_MAX_ATTEMPTS: 3,
   BINANCE_RETRY_SLEEP_MS: 400,
   TPE_WITHDRAWAL_SHEET: 'TPE withdrawal',
-  // Slack — prefer Script Properties SLACK_BOT_TOKEN / SLACK_CHANNEL_ID
-  SLACK_BOT_TOKEN: '',
-  SLACK_CHANNEL_ID: 'C0BRWAFT24C',
+  // Slack Incoming Webhook — prefer Script Property SLACK_WEBHOOK_URL
+  SLACK_WEBHOOK_URL: '',
   SLACK_CHANNEL_NAME: 'token-health-alerts',
   ALERT_IGNORE_TOKENS: ['USDT', 'USDC']
 };
@@ -52,27 +51,20 @@ function getCmcApiKey_() {
   return CONFIG.CMC_API_KEY || '';
 }
 
-/** Run once: paste xoxb token, then run setSlackBotToken() from the editor. */
-function setSlackBotToken() {
-  var token = 'PASTE_XOXB_TOKEN_HERE';
-  if (!token || token.indexOf('PASTE_') === 0) {
-    throw new Error('Replace PASTE_XOXB_TOKEN_HERE with your Slack bot token (xoxb-...), then run setSlackBotToken().');
+/** Run once: paste Incoming Webhook URL, then run setSlackWebhookUrl() from the editor. */
+function setSlackWebhookUrl() {
+  var url = 'PASTE_WEBHOOK_URL_HERE';
+  if (!url || url.indexOf('PASTE_') === 0 || url.indexOf('hooks.slack.com') === -1) {
+    throw new Error('Replace PASTE_WEBHOOK_URL_HERE with your Slack webhook URL (https://hooks.slack.com/services/...), then run setSlackWebhookUrl().');
   }
-  PropertiesService.getScriptProperties().setProperty('SLACK_BOT_TOKEN', token);
-  PropertiesService.getScriptProperties().setProperty('SLACK_CHANNEL_ID', CONFIG.SLACK_CHANNEL_ID || 'C0BRWAFT24C');
-  Logger.log('SLACK_BOT_TOKEN + SLACK_CHANNEL_ID saved to Script Properties.');
+  PropertiesService.getScriptProperties().setProperty('SLACK_WEBHOOK_URL', url);
+  Logger.log('SLACK_WEBHOOK_URL saved to Script Properties.');
 }
 
-function getSlackBotToken_() {
-  var fromProps = PropertiesService.getScriptProperties().getProperty('SLACK_BOT_TOKEN');
+function getSlackWebhookUrl_() {
+  var fromProps = PropertiesService.getScriptProperties().getProperty('SLACK_WEBHOOK_URL');
   if (fromProps && String(fromProps).trim()) return String(fromProps).trim();
-  return CONFIG.SLACK_BOT_TOKEN || '';
-}
-
-function getSlackChannelId_() {
-  var fromProps = PropertiesService.getScriptProperties().getProperty('SLACK_CHANNEL_ID');
-  if (fromProps && String(fromProps).trim()) return String(fromProps).trim();
-  return CONFIG.SLACK_CHANNEL_ID || 'C0BRWAFT24C';
+  return CONFIG.SLACK_WEBHOOK_URL || '';
 }
 
 function runAllCryptoTrackers() {
@@ -711,15 +703,15 @@ function removeTokenFromTpeSheet_(tpeSheet, token) {
 }
 
 /**
- * One Slack message per alert, format:
+ * One Slack message per alert via Incoming Webhook.
+ * Format:
  * GRT | D1W1 : 2→1 | Current Active: Gate
  * Action: Ask MOC and Fund Ops; add to TPE withdrawal sheet
  */
 function sendD1W1SlackAlert_(timestampString, row) {
-  var token = getSlackBotToken_();
-  var channel = getSlackChannelId_();
-  if (!token) {
-    Logger.log('❌ Slack bot token missing. Run setSlackBotToken() or set Script Property SLACK_BOT_TOKEN.');
+  var webhookUrl = getSlackWebhookUrl_();
+  if (!webhookUrl) {
+    Logger.log('❌ Slack webhook missing. Run setSlackWebhookUrl() or set Script Property SLACK_WEBHOOK_URL.');
     return;
   }
 
@@ -730,26 +722,18 @@ function sendD1W1SlackAlert_(timestampString, row) {
     '_Verified: ' + timestampString + ' IST_';
 
   try {
-    var resp = UrlFetchApp.fetch('https://slack.com/api/chat.postMessage', {
+    var resp = UrlFetchApp.fetch(webhookUrl, {
       method: 'post',
-      contentType: 'application/json; charset=utf-8',
-      headers: { Authorization: 'Bearer ' + token },
-      payload: JSON.stringify({
-        channel: channel,
-        text: text,
-        unfurl_links: false,
-        unfurl_media: false
-      }),
+      contentType: 'application/json',
+      payload: JSON.stringify({ text: text }),
       muteHttpExceptions: true
     });
     var code = resp.getResponseCode();
-    var body = resp.getContentText() || '';
-    var json = {};
-    try { json = JSON.parse(body); } catch (e) {}
-    if (code !== 200 || !json.ok) {
-      Logger.log('❌ Slack post failed for ' + row.token + ': HTTP ' + code + ' ' + body.substring(0, 300));
+    var body = (resp.getContentText() || '').substring(0, 200);
+    if (code !== 200) {
+      Logger.log('❌ Slack webhook failed for ' + row.token + ': HTTP ' + code + ' ' + body);
     } else {
-      Logger.log('✅ Slack alert sent for ' + row.token + ' → #' + (CONFIG.SLACK_CHANNEL_NAME || channel));
+      Logger.log('✅ Slack alert sent for ' + row.token + ' → #' + (CONFIG.SLACK_CHANNEL_NAME || 'token-health-alerts'));
     }
   } catch (e) {
     Logger.log('❌ Slack exception for ' + row.token + ': ' + e);
