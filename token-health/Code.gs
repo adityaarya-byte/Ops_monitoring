@@ -67,6 +67,29 @@ function getSlackWebhookUrl_() {
   return CONFIG.SLACK_WEBHOOK_URL || '';
 }
 
+/**
+ * Run this alone to verify the webhook.
+ * Success means the message posted to whatever channel THIS webhook was created for
+ * (check Slack App → Incoming Webhooks → Post to Channel).
+ */
+function testSlackWebhook() {
+  var webhookUrl = getSlackWebhookUrl_();
+  if (!webhookUrl) {
+    Logger.log('❌ No SLACK_WEBHOOK_URL set. Run setSlackWebhookUrl() first.');
+    return;
+  }
+  var resp = UrlFetchApp.fetch(webhookUrl, {
+    method: 'post',
+    contentType: 'application/json',
+    payload: JSON.stringify({
+      text: 'Token Health test ✅\nIf you see this, webhook works.\nCheck which channel this Incoming Webhook is linked to in Slack App settings.'
+    }),
+    muteHttpExceptions: true
+  });
+  Logger.log('HTTP ' + resp.getResponseCode() + ' body=' + resp.getContentText());
+  Logger.log('Tip: Incoming Webhooks post ONLY to the channel selected when the webhook was created — not necessarily #token-health-alerts.');
+}
+
 function runAllCryptoTrackers() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
 
