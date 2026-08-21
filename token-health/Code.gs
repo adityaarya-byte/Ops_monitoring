@@ -756,7 +756,8 @@ function sendD1W1SlackAlert_(timestampString, row) {
     if (code !== 200) {
       Logger.log('❌ Slack webhook failed for ' + row.token + ': HTTP ' + code + ' ' + body);
     } else {
-      Logger.log('✅ Slack alert sent for ' + row.token + ' → #' + (CONFIG.SLACK_CHANNEL_NAME || 'token-health-alerts'));
+      Logger.log('✅ Slack webhook accepted alert for ' + row.token +
+        ' (HTTP 200). Message goes to the channel this webhook was created for — confirm in Slack App → Incoming Webhooks.');
     }
   } catch (e) {
     Logger.log('❌ Slack exception for ' + row.token + ': ' + e);
