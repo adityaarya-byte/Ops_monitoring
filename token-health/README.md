@@ -1,35 +1,30 @@
 # Token Health
 
-Google Apps Script tracker for listing / volume / chain D1W1 health.
+## Alerts → Slack `#token-health-alerts`
 
-## D1W1 rule
+One Slack message **per token** (not batched). Format:
 
-For each token, for each exchange (KuCoin, Binance, Gate):
+```
+GRT | D1W1 : 2→1 | Current Active: Gate
+Action: Ask MOC and Fund Ops; add to TPE withdrawal sheet
+Verified: 2026-08-21 14:55 IST
+```
 
-> If **any** chain has `deposit=Yes` **and** `withdraw=Yes` → that exchange counts as **1**.
+### Skipped
+- **3 → 2** (no Slack, no ALERTS row)
+- **USDT** / **USDC**
 
-Example **GRT**: KuCoin none, Binance ARBITRUM, Gate ETH/ARBEVM → count **2** (`Gate,Binance`).
+### Setup Slack bot token
+1. Invite bot to `#token-health-alerts`
+2. Apps Script → paste token into `setSlackBotToken()` → Run once  
+   Or Script Properties: `SLACK_BOT_TOKEN` = `xoxb-...`, `SLACK_CHANNEL_ID` = `C0BRWAFT24C`
 
-**CHR** with KuCoin+Binance+Gate all D1W1 somewhere → count **3** → no alert if previous was also 3.
-
-Asymmetric **D0W1** (deposit NO, withdraw Yes) is shown on CHAIN/Monitoring only — it does **not** trigger alerts (this was the CHR false positive).
-
-## Action column (ALERTS col F)
-
+### Action rules
 | Change | Action |
 |--------|--------|
-| 3 → 2 | No action |
 | 2 → 1 | Ask MOC and Fund Ops; add to TPE withdrawal sheet |
 | 1 → 0 | Check funds should be TPE |
 | 1 → 2 | No action |
 | 2 → 3 | Remove from TPE withdrawal sheet |
 
-Sheet `TPE withdrawal` is auto-updated for add/remove actions.
-
-## Sheets
-
-HEALTH, CHAIN, ALERTS, Monitoring, TPE withdrawal
-
-## Entry point
-
-`runAllCryptoTrackers()`
+Entry point: `runAllCryptoTrackers()`
