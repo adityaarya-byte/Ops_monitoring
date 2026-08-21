@@ -2,13 +2,11 @@
  * Token Health — single-file Google Apps Script
  * Sheets: HEALTH, CHAIN, ALERTS, Monitoring, TPE withdrawal
  *
- * D1W1 definition (per token):
- *   For each exchange (KuCoin / Binance / Gate): if ANY chain has
- *   deposit=Yes AND withdraw=Yes → that exchange counts as 1.
- *   Active count = 0..3. Example GRT: KuCoin none, Binance ARBITRUM, Gate ETH → 2.
+ * D1W1: per exchange, any chain with deposit=Yes AND withdraw=Yes → count 1.
  *
- * Alerts fire when that count changes. ALERTS column F = Action to take.
- * Asymmetric D0W1 (deposit NO + withdraw Yes) is logged on CHAIN/Monitoring only — no email.
+ * Alerts → Slack #token-health-alerts (one message per token, not batched).
+ * Skip: 3→2, USDT, USDC.
+ * Script Properties: SLACK_BOT_TOKEN (xoxb-...), SLACK_CHANNEL_ID (default C0BRWAFT24C)
  */
 
 var CONFIG = {
@@ -31,25 +29,11 @@ var CONFIG = {
   BINANCE_MAX_ATTEMPTS: 3,
   BINANCE_RETRY_SLEEP_MS: 400,
   TPE_WITHDRAWAL_SHEET: 'TPE withdrawal',
-  ALERT_RECIPIENTS: [
-    'aditya.arya@coindcx.com',
-    'abdul.khan@coindcx.com',
-    'akash.naidu@coindcx.com',
-    'ayush.agarwal@coindcx.com',
-    'chitresh.kashyap@coindcx.com',
-    'cletus.dias@coindcx.com',
-    'harsh.pandey@coindcx.com',
-    'harshit.gupta@coindcx.com',
-    'jatin.bisht@coindcx.com',
-    'jayadrath.rondal@coindcx.com',
-    'mihir.sutariya@coindcx.com',
-    'mohit.mittal@coindcx.com',
-    'obaid.rehman@coindcx.com',
-    'ronak.keny@coindcx.com',
-    'sujay.patil@coindcx.com',
-    'therese.joseph@coindcx.com',
-    'pratik.gothankar@coindcx.com'
-  ]
+  // Slack — prefer Script Properties SLACK_BOT_TOKEN / SLACK_CHANNEL_ID
+  SLACK_BOT_TOKEN: '',
+  SLACK_CHANNEL_ID: 'C0BRWAFT24C',
+  SLACK_CHANNEL_NAME: 'token-health-alerts',
+  ALERT_IGNORE_TOKENS: ['USDT', 'USDC']
 };
 
 /** Run once from the Apps Script editor to store the CMC key securely. */
@@ -66,6 +50,29 @@ function getCmcApiKey_() {
   var fromProps = PropertiesService.getScriptProperties().getProperty('CMC_API_KEY');
   if (fromProps && String(fromProps).trim()) return String(fromProps).trim();
   return CONFIG.CMC_API_KEY || '';
+}
+
+/** Run once: paste xoxb token, then run setSlackBotToken() from the editor. */
+function setSlackBotToken() {
+  var token = 'PASTE_XOXB_TOKEN_HERE';
+  if (!token || token.indexOf('PASTE_') === 0) {
+    throw new Error('Replace PASTE_XOXB_TOKEN_HERE with your Slack bot token (xoxb-...), then run setSlackBotToken().');
+  }
+  PropertiesService.getScriptProperties().setProperty('SLACK_BOT_TOKEN', token);
+  PropertiesService.getScriptProperties().setProperty('SLACK_CHANNEL_ID', CONFIG.SLACK_CHANNEL_ID || 'C0BRWAFT24C');
+  Logger.log('SLACK_BOT_TOKEN + SLACK_CHANNEL_ID saved to Script Properties.');
+}
+
+function getSlackBotToken_() {
+  var fromProps = PropertiesService.getScriptProperties().getProperty('SLACK_BOT_TOKEN');
+  if (fromProps && String(fromProps).trim()) return String(fromProps).trim();
+  return CONFIG.SLACK_BOT_TOKEN || '';
+}
+
+function getSlackChannelId_() {
+  var fromProps = PropertiesService.getScriptProperties().getProperty('SLACK_CHANNEL_ID');
+  if (fromProps && String(fromProps).trim()) return String(fromProps).trim();
+  return CONFIG.SLACK_CHANNEL_ID || 'C0BRWAFT24C';
 }
 
 function runAllCryptoTrackers() {
@@ -544,6 +551,18 @@ function runAllCryptoTrackers() {
     var pastCount = previousD1W1Counts[token];
     if (liveCount === pastCount) return;
 
+    // Ignore USDT / USDC
+    if (shouldIgnoreAlertToken_(token)) {
+      Logger.log('Skip alert for ignored token: ' + token);
+      return;
+    }
+
+    // Ignore 3 → 2 (no Slack, no ALERTS row)
+    if (Number(pastCount) === 3 && Number(liveCount) === 2) {
+      Logger.log('Skip 3→2 alert for ' + token);
+      return;
+    }
+
     var action = getD1W1Action_(pastCount, liveCount);
     var direction = liveCount < pastCount ? 'DROP' : 'INCREASE';
     var alertString = 'Token [' + token + '] D1W1 ' +
@@ -551,7 +570,7 @@ function runAllCryptoTrackers() {
       ' from ' + pastCount + ' to ' + liveCount +
       '. Active D1W1 exchanges: (' + (liveExchangeList || 'None') + ')';
 
-    // ALERTS: Date | Token | Prev | Curr | Message | Action
+    // ALERTS: one new row per alert
     incomingAlertsList.push([
       timestampString, token, pastCount, liveCount, alertString, action
     ]);
@@ -566,7 +585,6 @@ function runAllCryptoTrackers() {
       message: alertString
     });
 
-    // Auto TPE sheet mutations from action text
     applyTpeSheetAction_(tpeSheet, token, action, timestampString);
   });
 
@@ -574,9 +592,10 @@ function runAllCryptoTrackers() {
     chainSheet.getRange(2, 10, summaryOutput.length, 4).setValues(summaryOutput);
   }
 
-  if (d1w1AlertRows.length > 0) {
-    sendBatchedD1W1ActionEmail_(timestampString, d1w1AlertRows);
-  }
+  // One Slack message per alert (not combined)
+  d1w1AlertRows.forEach(function (row) {
+    sendD1W1SlackAlert_(timestampString, row);
+  });
 
   // =========================================================
   // PHASE 8: ALERTS TAB (with Action column)
@@ -592,17 +611,25 @@ function runAllCryptoTrackers() {
 }
 
 // =========================================================
-// D1W1 ACTION + TPE SHEET + EMAIL HELPERS
+// D1W1 ACTION + TPE SHEET + SLACK HELPERS
 // =========================================================
+
+function shouldIgnoreAlertToken_(token) {
+  var t = String(token || '').trim().toUpperCase();
+  var ignore = CONFIG.ALERT_IGNORE_TOKENS || ['USDT', 'USDC'];
+  for (var i = 0; i < ignore.length; i++) {
+    if (t === String(ignore[i]).toUpperCase()) return true;
+  }
+  return false;
+}
 
 /**
  * Action rules:
- *  3 → 2 : No action
+ *  3 → 2 : ignored (no alert)
  *  2 → 1 : Ask MOC and Fund Ops; add to TPE withdrawal sheet
  *  1 → 0 : Check funds should be TPE
  *  1 → 2 : No action
  *  2 → 3 : Remove from TPE withdrawal sheet
- * Other transitions use closest matching rule.
  */
 function getD1W1Action_(prev, curr) {
   prev = Number(prev);
@@ -616,7 +643,6 @@ function getD1W1Action_(prev, curr) {
     return 'No action';
   }
 
-  // increasing
   if (curr === 3 && prev === 2) return 'Remove from TPE withdrawal sheet';
   if (curr === 3 && prev < 3) return 'Remove from TPE withdrawal sheet';
   return 'No action';
@@ -634,7 +660,6 @@ function ensureD1W1AlertsHeader_(alertsSheet) {
   }
   var current = alertsSheet.getRange(1, 1, 1, 6).getValues()[0];
   if (String(current[5] || '').toLowerCase().indexOf('action') === -1) {
-    // Ensure Action header in column F without wiping history
     alertsSheet.getRange(1, 6).setValue('Action').setFontWeight('bold');
     if (String(current[0]).indexOf('Date') === -1) {
       alertsSheet.insertRowBefore(1);
@@ -685,63 +710,49 @@ function removeTokenFromTpeSheet_(tpeSheet, token) {
   }
 }
 
-function sendBatchedD1W1ActionEmail_(timestampString, rows) {
-  var tokenList = rows.map(function (r) { return r.token; }).join(', ');
-  var dropCount = 0;
-  var increaseCount = 0;
-  var tableRows = '';
+/**
+ * One Slack message per alert, format:
+ * GRT | D1W1 : 2→1 | Current Active: Gate
+ * Action: Ask MOC and Fund Ops; add to TPE withdrawal sheet
+ */
+function sendD1W1SlackAlert_(timestampString, row) {
+  var token = getSlackBotToken_();
+  var channel = getSlackChannelId_();
+  if (!token) {
+    Logger.log('❌ Slack bot token missing. Run setSlackBotToken() or set Script Property SLACK_BOT_TOKEN.');
+    return;
+  }
 
-  rows.forEach(function (r, idx) {
-    if (r.direction === 'DROP') dropCount++;
-    else increaseCount++;
-
-    var dirColor = r.direction === 'DROP' ? '#fb923c' : '#10b981';
-    var bg = idx % 2 === 0 ? '#111827' : '#0B1220';
-
-    tableRows +=
-      '<tr style="background-color:' + bg + ';">' +
-      '<td style="padding:10px 8px;border-bottom:1px solid #1A202C;font-weight:bold;color:#fb923c;">' + r.token + '</td>' +
-      '<td style="padding:10px 8px;border-bottom:1px solid #1A202C;color:' + dirColor + ';font-weight:bold;text-align:center;">' + r.direction + '</td>' +
-      '<td style="padding:10px 8px;border-bottom:1px solid #1A202C;color:#a855f7;text-align:center;">' + r.pastCount + '</td>' +
-      '<td style="padding:10px 8px;border-bottom:1px solid #1A202C;color:' + dirColor + ';text-align:center;font-weight:bold;">' + r.liveCount + '</td>' +
-      '<td style="padding:10px 8px;border-bottom:1px solid #1A202C;color:#e2e8f0;">' + r.liveExchangeList + '</td>' +
-      '<td style="padding:10px 8px;border-bottom:1px solid #1A202C;color:#fde68a;font-weight:bold;">' + r.action + '</td>' +
-      '</tr>';
-  });
-
-  var borderColor = dropCount > 0 ? '#fb923c' : '#10b981';
-  var htmlBody =
-    '<div style="font-family:\'Courier New\',Courier,monospace;max-width:980px;background-color:#0B1220;border:2px solid ' + borderColor + ';padding:20px;border-radius:4px;color:#ffffff;">' +
-    '<h2 style="color:' + borderColor + ';margin-top:0;font-size:20px;border-bottom:1px solid ' + borderColor + ';padding-bottom:10px;">' +
-    'D1W1 Exchange Count Changes (' + rows.length + ')</h2>' +
-    '<p style="color:#94a3b8;font-size:13px;margin:8px 0 12px;">Verified: <span style="color:#38bdf8;font-weight:bold;">' + timestampString + '</span>' +
-    ' | Drops: <span style="color:#fb923c;font-weight:bold;">' + dropCount + '</span>' +
-    ' | Increases: <span style="color:#10b981;font-weight:bold;">' + increaseCount + '</span></p>' +
-    '<p style="color:#cbd5e1;font-size:12px;margin:0 0 14px;">Count = how many exchanges have Deposit+Withdraw both ON on at least one chain.</p>' +
-    '<table style="width:100%;border-collapse:collapse;font-size:13px;color:#e2e8f0;">' +
-    '<thead><tr style="background-color:#1A202C;">' +
-    '<th style="padding:10px 8px;text-align:left;color:#94a3b8;">Token</th>' +
-    '<th style="padding:10px 8px;text-align:center;color:#94a3b8;">Dir</th>' +
-    '<th style="padding:10px 8px;text-align:center;color:#94a3b8;">Prev</th>' +
-    '<th style="padding:10px 8px;text-align:center;color:#94a3b8;">Curr</th>' +
-    '<th style="padding:10px 8px;text-align:left;color:#94a3b8;">Active D1W1</th>' +
-    '<th style="padding:10px 8px;text-align:left;color:#94a3b8;">Action</th>' +
-    '</tr></thead><tbody>' + tableRows + '</tbody></table>' +
-    '<hr style="border:0;border-top:1px solid #1A202C;margin:20px 0;">' +
-    '<p style="font-size:11px;color:#4a5568;text-align:center;margin:0;">CoinDCX Operations // Token Health</p>' +
-    '</div>';
+  var text =
+    '*' + row.token + '* | D1W1 : ' + row.pastCount + '→' + row.liveCount +
+    ' | Current Active: ' + (row.liveExchangeList || 'None') + '\n' +
+    'Action: ' + row.action + '\n' +
+    '_Verified: ' + timestampString + ' IST_';
 
   try {
-    MailApp.sendEmail({
-      to: CONFIG.ALERT_RECIPIENTS.join(','),
-      subject: (dropCount > 0 ? '🚨' : '🟢') + ' D1W1 count changes — ' + rows.length +
-        ' token' + (rows.length > 1 ? 's' : '') + ' [' + tokenList + ']',
-      htmlBody: htmlBody,
-      name: 'Token Health Chain Metrix'
+    var resp = UrlFetchApp.fetch('https://slack.com/api/chat.postMessage', {
+      method: 'post',
+      contentType: 'application/json; charset=utf-8',
+      headers: { Authorization: 'Bearer ' + token },
+      payload: JSON.stringify({
+        channel: channel,
+        text: text,
+        unfurl_links: false,
+        unfurl_media: false
+      }),
+      muteHttpExceptions: true
     });
-    Logger.log('📧 D1W1 action email sent (' + rows.length + ').');
-  } catch (mailErr) {
-    Logger.log('❌ D1W1 action email failed: ' + mailErr);
+    var code = resp.getResponseCode();
+    var body = resp.getContentText() || '';
+    var json = {};
+    try { json = JSON.parse(body); } catch (e) {}
+    if (code !== 200 || !json.ok) {
+      Logger.log('❌ Slack post failed for ' + row.token + ': HTTP ' + code + ' ' + body.substring(0, 300));
+    } else {
+      Logger.log('✅ Slack alert sent for ' + row.token + ' → #' + (CONFIG.SLACK_CHANNEL_NAME || channel));
+    }
+  } catch (e) {
+    Logger.log('❌ Slack exception for ' + row.token + ': ' + e);
   }
 }
 
