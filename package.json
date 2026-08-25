@@ -1,0 +1,9 @@
+{
+  "name": "ops-monitoring",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Ops monitoring alerts (Google Apps Script)",
+  "scripts": {
+    "test": "node tests/leverage-monitoring.test.js"
+  }
+}
