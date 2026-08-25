@@ -17,6 +17,10 @@ Utilization ≥ 100% on a name with Max Notional **≤ 450,000** is **not** 1-CR
 
 Underutilized names with Max Notional **≤ 450,000** do **not** get a reduce-tier action.
 
+## Spreadsheet timeouts
+
+`writeLiveChecksSheet` used to delete and recreate the Live Checks tab, then color each row with a separate Sheets call. That is what produced `Service Spreadsheets timed out while accessing document...`. The script now reuses the existing tab, writes values and colors in batch, and retries up to 4 times on a timeout.
+
 ## Ignore / exception list
 
 To keep a token off Live Checks and the email, add it to `CONFIG.IGNORE_SYMBOLS` using the exact symbol from the Outcome sheet:

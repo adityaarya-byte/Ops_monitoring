@@ -20,7 +20,7 @@
 // ============================= CONFIG =============================
 var CONFIG = {
   SOURCE_SHEET_NAME: 'Outcome',          // sheet to read data from
-  OUTPUT_SHEET_NAME: 'Live Checks',      // sheet to write results to (recreated each run)
+  OUTPUT_SHEET_NAME: 'Live Checks',      // sheet to write results to (cleared and rewritten each run)
   EMAIL_TO: 'aditya.arya@coindcx.com',    // <-- CHANGE THIS to your email
   EMAIL_SUBJECT_PREFIX: 'Leverage Monitoring — Weekly Report',
 
@@ -41,6 +41,10 @@ var CONFIG = {
   // Example: IGNORE_SYMBOLS: ['BTCUSDT', 'ETHUSDT'],
   IGNORE_SYMBOLS: [],
 
+  // Retry when Google Sheets times out ("Service Spreadsheets timed out...").
+  SHEETS_RETRY_ATTEMPTS: 4,
+  SHEETS_RETRY_BASE_MS: 2000,
+
   // Trigger schedule
   TRIGGER_WEEKDAY: ScriptApp.WeekDay.MONDAY,
   TRIGGER_HOUR: 8                        // 8am, in the spreadsheet's timezone
@@ -58,7 +62,9 @@ function runLeverageCheckNow() {
     throw new Error('Could not find a sheet named "' + CONFIG.SOURCE_SHEET_NAME + '". Check CONFIG.SOURCE_SHEET_NAME.');
   }
 
-  var data = srcSheet.getDataRange().getValues();
+  var data = withSpreadsheetRetry(function () {
+    return srcSheet.getDataRange().getValues();
+  });
   var headers = data[0];
   var rows = data.slice(1).filter(function (r) { return r[0] !== '' && r[0] !== null; });
 
@@ -115,6 +121,30 @@ function toNumber(v) {
 
 function isAboveNotionalFloor(maxNotional) {
   return toNumber(maxNotional) > CONFIG.MAX_NOTIONAL_TIER_THRESHOLD;
+}
+
+function isTransientSpreadsheetError(err) {
+  var msg = String(err && err.message ? err.message : err);
+  return /timed out|timeout|Service Spreadsheets|Internal error|try again/i.test(msg);
+}
+
+/** Retries Sheets reads/writes that fail with a transient service timeout. */
+function withSpreadsheetRetry(fn) {
+  var maxAttempts = CONFIG.SHEETS_RETRY_ATTEMPTS || 4;
+  var baseMs = CONFIG.SHEETS_RETRY_BASE_MS || 2000;
+  var lastErr;
+  for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt === maxAttempts || !isTransientSpreadsheetError(err)) throw err;
+      var waitMs = baseMs * Math.pow(2, attempt - 1);
+      Logger.log('Spreadsheet timeout (attempt ' + attempt + '/' + maxAttempts + '), retrying in ' + waitMs + 'ms: ' + err);
+      Utilities.sleep(waitMs);
+    }
+  }
+  throw lastErr;
 }
 
 /** True if this symbol is on CONFIG.IGNORE_SYMBOLS (case-insensitive, trimmed). */
@@ -200,50 +230,73 @@ function evaluateRow(row, c) {
   };
 }
 
-/** Clears/recreates the Live Checks sheet and writes all rows with color coding. */
-function writeLiveChecksSheet(ss, results) {
-  var sheet = ss.getSheetByName(CONFIG.OUTPUT_SHEET_NAME);
-  if (sheet) ss.deleteSheet(sheet);
-  sheet = ss.insertSheet(CONFIG.OUTPUT_SHEET_NAME);
-
-  var headers = ['Symbol', 'Volatility Type', 'DCX on Binance', 'Max Notional to Users',
+function liveChecksHeaders() {
+  return ['Symbol', 'Volatility Type', 'DCX on Binance', 'Max Notional to Users',
     'User Position', 'User Position Prior Week', 'Highest Single User Position',
     'Utilization %', 'Utilization Status', 'Conc. vs DCX-Binance %', 'Conc. vs DCX-Binance Status',
     'Conc. vs Max Notional %', 'Conc. vs Max Notional Status', 'Underutilized Status', 'MASTER ACTION'];
+}
+
+function resultToRow(r) {
+  return [r.symbol, r.volatilityType, r.dcxOnBinance, r.maxNotional, r.userPosition,
+    r.userPositionPrior, r.highestSingleUser, r.utilizationPct, r.utilizationStatus,
+    r.concDcxPct, r.concDcxStatus, r.concMaxPct, r.concMaxStatus, r.underutilStatus, r.master];
+}
+
+function masterActionColor(master) {
+  master = String(master || '');
+  if (master.indexOf('1-CRITICAL') === 0) return '#F8CBCB';
+  if (master.indexOf('2-WARNING') === 0 || master.indexOf('3-WATCH') === 0) return '#FDE9C8';
+  if (master.indexOf('4-ACTION') === 0) return '#EFEFEF';
+  if (master === 'OK') return '#D9EAD3';
+  return '#FFFFFF';
+}
+
+function rowBackgrounds(rows, colCount) {
+  return rows.map(function (row) {
+    var color = masterActionColor(row[14]);
+    var bg = [];
+    for (var i = 0; i < colCount; i++) bg.push(color);
+    return bg;
+  });
+}
+
+/**
+ * Clears and rewrites the Live Checks sheet. Reuses the existing tab (no
+ * delete/insert) and paints row colors in one setBackgrounds() call so
+ * Google Sheets does not time out on large symbol lists.
+ */
+function writeLiveChecksSheet(ss, results) {
+  withSpreadsheetRetry(function () {
+    writeLiveChecksSheetOnce(ss, results);
+  });
+}
+
+function writeLiveChecksSheetOnce(ss, results) {
+  var headers = liveChecksHeaders();
+  var sheet = ss.getSheetByName(CONFIG.OUTPUT_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(CONFIG.OUTPUT_SHEET_NAME);
+  } else {
+    if (sheet.getFilter()) sheet.getFilter().remove();
+    sheet.clear();
+  }
 
   sheet.getRange(1, 1, 1, headers.length).setValues([headers])
     .setFontWeight('bold').setFontColor('#FFFFFF').setBackground('#2E5F8A')
     .setWrap(true).setVerticalAlignment('top');
   sheet.setFrozenRows(1);
 
-  var rows = results.map(function (r) {
-    return [r.symbol, r.volatilityType, r.dcxOnBinance, r.maxNotional, r.userPosition,
-      r.userPositionPrior, r.highestSingleUser, r.utilizationPct, r.utilizationStatus,
-      r.concDcxPct, r.concDcxStatus, r.concMaxPct, r.concMaxStatus, r.underutilStatus, r.master];
-  });
-
+  var rows = results.map(resultToRow);
   if (rows.length > 0) {
     var range = sheet.getRange(2, 1, rows.length, headers.length);
     range.setValues(rows);
-    sheet.getRange(2, 8, rows.length, 1).setNumberFormat('0.00%');  // Utilization %
-    sheet.getRange(2, 10, rows.length, 1).setNumberFormat('0.00%'); // Conc vs DCX %
-    sheet.getRange(2, 12, rows.length, 1).setNumberFormat('0.00%'); // Conc vs Max Notional %
-
-    // Color-code each row by its MASTER ACTION priority
-    for (var i = 0; i < rows.length; i++) {
-      var rowRange = sheet.getRange(i + 2, 1, 1, headers.length);
-      var master = rows[i][14];
-      var color = '#FFFFFF';
-      if (master.indexOf('1-CRITICAL') === 0) color = '#F8CBCB';
-      else if (master.indexOf('2-WARNING') === 0 || master.indexOf('3-WATCH') === 0) color = '#FDE9C8';
-      else if (master.indexOf('4-ACTION') === 0) color = '#EFEFEF';
-      else if (master === 'OK') color = '#D9EAD3';
-      rowRange.setBackground(color);
-    }
+    range.setBackgrounds(rowBackgrounds(rows, headers.length));
+    sheet.getRange(2, 8, rows.length, 1).setNumberFormat('0.00%');
+    sheet.getRange(2, 10, rows.length, 1).setNumberFormat('0.00%');
+    sheet.getRange(2, 12, rows.length, 1).setNumberFormat('0.00%');
   }
 
-  sheet.autoResizeColumns(1, headers.length);
-  sheet.getFilter() && sheet.getFilter().remove();
   sheet.getRange(1, 1, rows.length + 1, headers.length).createFilter();
 }
 

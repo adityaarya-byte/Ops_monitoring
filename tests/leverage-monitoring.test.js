@@ -11,7 +11,7 @@ function loadLogic() {
     ScriptApp: { WeekDay: { MONDAY: 'MONDAY' } },
     SpreadsheetApp: {},
     MailApp: {},
-    Utilities: {},
+    Utilities: { sleep: function () {} },
     Logger: { log: function () {} }
   };
   vm.createContext(sandbox);
@@ -24,7 +24,11 @@ function loadLogic() {
     mapHeaders: sandbox.mapHeaders,
     evaluateRow: sandbox.evaluateRow,
     buildSummary: sandbox.buildSummary,
-    isIgnoredSymbol: sandbox.isIgnoredSymbol
+    isIgnoredSymbol: sandbox.isIgnoredSymbol,
+    masterActionColor: sandbox.masterActionColor,
+    rowBackgrounds: sandbox.rowBackgrounds,
+    isTransientSpreadsheetError: sandbox.isTransientSpreadsheetError,
+    withSpreadsheetRetry: sandbox.withSpreadsheetRetry
   };
 }
 
@@ -187,6 +191,46 @@ test('isIgnoredSymbol matches IGNORE_SYMBOLS case-insensitively', function () {
   } finally {
     logic.CONFIG.IGNORE_SYMBOLS = original;
   }
+});
+
+test('masterActionColor maps each priority to the Live Checks row color', function () {
+  assert.strictEqual(logic.masterActionColor('1-CRITICAL: Capacity breach'), '#F8CBCB');
+  assert.strictEqual(logic.masterActionColor('2-WARNING: cap user'), '#FDE9C8');
+  assert.strictEqual(logic.masterActionColor('3-WATCH: Utilization >70%'), '#FDE9C8');
+  assert.strictEqual(logic.masterActionColor('4-ACTION: Underutilized 2wks - reduce tier on DCX'), '#EFEFEF');
+  assert.strictEqual(logic.masterActionColor('OK'), '#D9EAD3');
+});
+
+test('rowBackgrounds paints every cell in a row the same master color', function () {
+  var rows = [
+    ['A', '', '', '', '', '', '', '', '', '', '', '', '', '', '1-CRITICAL: x'],
+    ['B', '', '', '', '', '', '', '', '', '', '', '', '', '', 'OK']
+  ];
+  var bg = logic.rowBackgrounds(rows, 3);
+  assert.strictEqual(JSON.stringify(bg), JSON.stringify([
+    ['#F8CBCB', '#F8CBCB', '#F8CBCB'],
+    ['#D9EAD3', '#D9EAD3', '#D9EAD3']
+  ]));
+});
+
+test('withSpreadsheetRetry retries timeouts then succeeds', function () {
+  var calls = 0;
+  var value = logic.withSpreadsheetRetry(function () {
+    calls += 1;
+    if (calls < 3) {
+      throw new Error('Service Spreadsheets timed out while accessing document with id abc');
+    }
+    return 'ok';
+  });
+  assert.strictEqual(value, 'ok');
+  assert.strictEqual(calls, 3);
+});
+
+test('isTransientSpreadsheetError matches the live timeout message', function () {
+  assert.strictEqual(logic.isTransientSpreadsheetError(
+    new Error('Service Spreadsheets timed out while accessing document with id 12VW3y_MEDK_zZy7zI5xumTahPc4lvyzfvf3ZTGex2cg.')
+  ), true);
+  assert.strictEqual(logic.isTransientSpreadsheetError(new Error('Could not find a column for: symbol')), false);
 });
 
 test('mapHeaders still finds Max Notional to Users', function () {
