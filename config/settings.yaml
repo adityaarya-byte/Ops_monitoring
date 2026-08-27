@@ -1,0 +1,33 @@
+# Target spreadsheet: New Listing metrics (performance checks)
+spreadsheet_id: 1yiO9iG0nBCAIO5mzmJTUJI3YxT7XJ4OeNuhKn2qfZZ8
+spot_tab: SPOT
+
+# Listing datetimes without a timezone are treated as IST.
+timezone: Asia/Kolkata
+
+# Tracking of volume / avg buy / rejection starts 24h after listing date+time.
+tracking_delay_hours: 24
+
+# Rolling window used when a query wants "last 24 hours".
+rolling_window_hours: 24
+
+sources:
+  # Always available from the public CoinDCX ticker.
+  current_price: coindcx
+  days_since_listing: calculated
+
+  # Plug in the warehouse query when you have it.
+  # Options: sql | coindcx_public | none
+  avg_volume: none
+  avg_buy_price: none
+  liquidity_rejection: none
+
+sql:
+  # How to run the .sql files in queries/. Ignored while sources are "none".
+  # Options: bigquery | postgres | csv
+  backend: csv
+  queries_dir: queries
+  # csv backend is for local dry-runs / tests (path relative to repo root).
+  csv_dir: data
+  # postgres: set DATABASE_URL in the environment.
+  # bigquery: set GOOGLE_CLOUD_PROJECT (and ADC / service account).

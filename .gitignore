@@ -1,0 +1,11 @@
+__pycache__/
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+data/spot_output.csv
+.env
+google-service-account.json
+*.pyc

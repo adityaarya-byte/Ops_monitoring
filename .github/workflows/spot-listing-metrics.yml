@@ -1,0 +1,48 @@
+name: SPOT listing metrics
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 01:00 IST daily (rolling 24h refresh)
+    - cron: "30 19 * * *"
+  pull_request:
+  push:
+    branches: [main, "cursor/**"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Tests
+        run: pytest
+      - name: Dry-run against CoinDCX public API
+        run: python -m listing_metrics --input-csv data/spot_input.csv --output-csv data/spot_output.csv --print-json
+
+  update-sheet:
+    if: github.event_name != 'pull_request'
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e ".[sheets,dev]"
+      - name: Write service account
+        if: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON != '' }}
+        run: |
+          printf '%s' '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}' > google-service-account.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$PWD/google-service-account.json" >> "$GITHUB_ENV"
+      - name: Update SPOT tab
+        if: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON != '' }}
+        run: python -m listing_metrics --sheet --print-json
+      - name: Skip sheet write
+        if: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON == '' }}
+        run: echo "No GOOGLE_SERVICE_ACCOUNT_JSON secret; skipping live sheet update."
