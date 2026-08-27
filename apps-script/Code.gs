@@ -1444,6 +1444,18 @@ function buildAlertsSheet() {
     alertsSheet.getRange(2, 9, n, 1).setBackgrounds(bgColors).setFontColors(fontColors);
 
     Logger.log('📊 alerts rebuilt: ' + sessions.length + ' session(s).');
+    try {
+      SpreadsheetApp.getActiveSpreadsheet().setActiveSheet(alertsSheet);
+      SpreadsheetApp.getUi().alert(
+        'Alerts rebuilt',
+        sessions.length + ' session(s) written to the "alerts" sheet.\n\n' +
+        'If you still see few/no rows: Data → Remove filter on the alerts tab.',
+        SpreadsheetApp.getUi().ButtonSet.OK
+      );
+    } catch (uiErr) {
+      // UI alert unavailable in time-driven triggers — log only
+      Logger.log('ℹ️ UI alert skipped: ' + uiErr.message);
+    }
   } else {
     Logger.log('⚠️ No sessions built (check Timestamps on transform rows).');
   }
