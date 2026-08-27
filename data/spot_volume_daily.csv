@@ -1,0 +1,4 @@
+token,avg_volume_per_day,avg_buy_price,liquidity_rejection_pct
+BTCUSDT,1234567.89,109250.5,1.25
+ETHUSDT,987654.0,3520.1,0.8
+SOLINR,456000.0,14500.0,2.1
