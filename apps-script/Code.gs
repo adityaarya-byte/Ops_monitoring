@@ -125,27 +125,6 @@ const SheetService = {
     return numRows;
   },
 
-  readAsObjects: function (sheetName, headers) {
-    const h = headers || TX_HEADERS;
-    const sheet = this.ensureSheetWithHeaders(sheetName, h);
-    const lastRow = sheet.getLastRow();
-    const lastCol = sheet.getLastColumn();
-    if (lastRow < 2 || lastCol === 0) return { headers: h, rows: [], sheet: sheet };
-
-    const values = sheet.getRange(1, 1, lastRow, lastCol).getValues();
-    const sheetHeaders = values[0];
-    const rows = [];
-    for (var i = 1; i < values.length; i++) {
-      const obj = {};
-      for (var c = 0; c < sheetHeaders.length; c++) {
-        obj[sheetHeaders[c]] = values[i][c];
-      }
-      obj.__row = i + 1;
-      rows.push(obj);
-    }
-    return { headers: sheetHeaders, rows: rows, sheet: sheet };
-  },
-
   appendObjects: function (sheetName, objects, headers) {
     if (!objects || objects.length === 0) return;
     const sheet = this.getSS().getSheetByName(sheetName);
@@ -192,13 +171,57 @@ const SheetService = {
     const lastRow = sheet.getLastRow();
     if (lastRow > maxCap + 1) {
       const excess = lastRow - (maxCap + 1);
-      // Keep at least one non-frozen row buffer when header is frozen
+      // Append-only log: drop OLDEST data rows (from row 2), keep newest at bottom
       const deletable = Math.min(excess, lastRow - 2);
       if (deletable > 0) {
-        sheet.deleteRows(maxCap + 2, deletable);
-        Logger.log('🗑️ Trimmed ' + deletable + ' excess row(s) from "' + sheetName + '"');
+        sheet.deleteRows(2, deletable);
+        Logger.log('🗑️ Trimmed ' + deletable + ' oldest row(s) from "' + sheetName + '"');
       }
     }
+  },
+
+  /** Map sheet row object onto expected header names (trim / case-insensitive). */
+  normalizeRowKeys_: function (obj, expectedHeaders) {
+    if (!obj) return obj;
+    const out = { __row: obj.__row };
+    const lower = {};
+    Object.keys(obj).forEach(function (k) {
+      if (k === '__row') return;
+      lower[String(k).trim().toLowerCase()] = obj[k];
+    });
+    (expectedHeaders || []).forEach(function (h) {
+      const key = String(h).trim();
+      if (obj[key] !== undefined && obj[key] !== '') {
+        out[key] = obj[key];
+      } else if (lower[key.toLowerCase()] !== undefined) {
+        out[key] = lower[key.toLowerCase()];
+      } else {
+        out[key] = obj[key] !== undefined ? obj[key] : '';
+      }
+    });
+    return out;
+  },
+
+  readAsObjects: function (sheetName, headers) {
+    const h = headers || TX_HEADERS;
+    const sheet = this.ensureSheetWithHeaders(sheetName, h);
+    const lastRow = sheet.getLastRow();
+    const lastCol = sheet.getLastColumn();
+    if (lastRow < 2 || lastCol === 0) return { headers: h, rows: [], sheet: sheet };
+
+    const values = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+    const sheetHeaders = values[0].map(function (x) { return String(x || '').trim(); });
+    const rows = [];
+    for (var i = 1; i < values.length; i++) {
+      const raw = {};
+      for (var c = 0; c < sheetHeaders.length; c++) {
+        if (!sheetHeaders[c]) continue;
+        raw[sheetHeaders[c]] = values[i][c];
+      }
+      raw.__row = i + 1;
+      rows.push(SheetService.normalizeRowKeys_(raw, h));
+    }
+    return { headers: sheetHeaders, rows: rows, sheet: sheet };
   }
 };
 
@@ -1309,12 +1332,32 @@ function transformRawMessages() {
 function buildAlertsSheet() {
   const txMain = SheetService.readAsObjects(CONFIG.SHEETS.TRANSFORM, TX_HEADERS).rows;
   const txCb = SheetService.readAsObjects(CONFIG.SHEETS.TRANSFORM_CB, TX_HEADERS).rows;
-  // Re-apply allowlist so stale transform history (old reasons) cannot enter alerts
-  const allRows = txMain.concat(txCb).filter(function (r) {
-    return AlertFilters.shouldKeepAlert(r);
+
+  var skippedFilter = 0;
+  var skippedTs = 0;
+  const allRows = [];
+  txMain.concat(txCb).forEach(function (r) {
+    if (!AlertFilters.shouldKeepAlert(r)) {
+      skippedFilter++;
+      return;
+    }
+    allRows.push(r);
   });
 
   const alertsSheet = SheetService.ensureSheetWithHeaders(CONFIG.SHEETS.ALERTS, AL_HEADERS);
+  // Remove sheet filters so rebuilt rows are not hidden from view
+  try {
+    const existingFilter = alertsSheet.getFilter();
+    if (existingFilter) existingFilter.remove();
+  } catch (e) { /* ignore */ }
+
+  Logger.log(
+    '📊 buildAlertsSheet: transform=' + txMain.length +
+    ' transform_cb=' + txCb.length +
+    ' keep=' + allRows.length +
+    ' filteredOut=' + skippedFilter
+  );
+
   if (allRows.length === 0) {
     SheetService.clearSheetDataRows(CONFIG.SHEETS.ALERTS);
     Logger.log('ℹ️ No allowlisted rows — alerts sheet cleared.');
@@ -1326,21 +1369,35 @@ function buildAlertsSheet() {
 
   const groups = {};
   allRows.forEach(function (r) {
-    if (!r.Timestamp) return;
+    if (!r.Timestamp) {
+      skippedTs++;
+      return;
+    }
     const ts = new Date(r.Timestamp);
-    if (isNaN(ts.getTime())) return;
-    const key = (r.Token || 'UNKNOWN') + '|' + (r.Exchange || 'UNKNOWN') + '|' + r.Channel + '|' + r.Response;
+    if (isNaN(ts.getTime())) {
+      skippedTs++;
+      return;
+    }
+    const key =
+      (r.Token || 'UNKNOWN') + '|' +
+      (r.Exchange || 'UNKNOWN') + '|' +
+      (r.Channel || '') + '|' +
+      (r.Response || '');
     if (!groups[key]) {
       groups[key] = {
         token: r.Token || 'N/A', exchange: r.Exchange || 'N/A',
         account: r.Account || 'N/A', side: r.Side || 'N/A',
-        channel: r.Channel, reason: r.Response,
+        channel: r.Channel || '', reason: r.Response || '',
         format: r.Format || '',
         timestamps: []
       };
     }
     groups[key].timestamps.push(ts);
   });
+
+  if (skippedTs > 0) {
+    Logger.log('⚠️ Skipped ' + skippedTs + ' keep-row(s) with missing/invalid Timestamp');
+  }
 
   const sessions = [];
   const now = new Date();
@@ -1387,6 +1444,8 @@ function buildAlertsSheet() {
     alertsSheet.getRange(2, 9, n, 1).setBackgrounds(bgColors).setFontColors(fontColors);
 
     Logger.log('📊 alerts rebuilt: ' + sessions.length + ' session(s).');
+  } else {
+    Logger.log('⚠️ No sessions built (check Timestamps on transform rows).');
   }
 
   // Refresh sheet dashboard after alerts rebuild (web app reads alerts live)
@@ -1401,9 +1460,14 @@ function createSessionRow(g, start, last, now, count) {
   const duration = Math.round((last - start) / 60000);
   const gapSinceLast = Math.round((now - last) / 60000);
   const status = gapSinceLast > CONFIG.INCIDENT_WINDOW_MINUTES ? 'Stopped' : 'Live';
-  const cls = (typeof classifyReason_ === 'function')
-    ? classifyReason_(g.reason, g.format, g.channel)
-    : { reasonCategory: 'Other', rejectionType: 'Uncategorized', severity: 'Low' };
+  var cls = { reasonCategory: 'Other', rejectionType: 'Uncategorized', severity: 'Low' };
+  try {
+    if (typeof classifyReason_ === 'function') {
+      cls = classifyReason_(g.reason, g.format, g.channel) || cls;
+    }
+  } catch (e) {
+    Logger.log('⚠️ classifyReason_ failed: ' + e.message);
+  }
   return {
     token: g.token, exchange: g.exchange, account: g.account,
     side: g.side, channel: g.channel,
@@ -1415,6 +1479,55 @@ function createSessionRow(g, start, last, now, count) {
     rejectionType: cls.rejectionType,
     severity: cls.severity
   };
+}
+
+/**
+ * Debug: why transform rows may be missing from alerts.
+ * Run from Apps Script editor → check Execution log.
+ */
+function debugAlertsBuild() {
+  const txMain = SheetService.readAsObjects(CONFIG.SHEETS.TRANSFORM, TX_HEADERS).rows;
+  const txCb = SheetService.readAsObjects(CONFIG.SHEETS.TRANSFORM_CB, TX_HEADERS).rows;
+  Logger.log('transform rows: ' + txMain.length);
+  Logger.log('transform_cb rows: ' + txCb.length);
+
+  var byCh = {};
+  var filteredSamples = [];
+  var badTs = 0;
+  txMain.concat(txCb).forEach(function (r) {
+    const ch = String(r.Channel || '(blank)');
+    if (!byCh[ch]) byCh[ch] = { total: 0, keep: 0, drop: 0 };
+    byCh[ch].total++;
+    if (AlertFilters.shouldKeepAlert(r)) {
+      byCh[ch].keep++;
+      if (!r.Timestamp || isNaN(new Date(r.Timestamp).getTime())) badTs++;
+    } else {
+      byCh[ch].drop++;
+      if (filteredSamples.length < 8) {
+        filteredSamples.push({
+          ch: ch,
+          fmt: r.Format,
+          token: r.Token,
+          resp: String(r.Response || '').substring(0, 60)
+        });
+      }
+    }
+  });
+
+  Object.keys(byCh).forEach(function (ch) {
+    Logger.log(
+      'channel ' + ch + ': total=' + byCh[ch].total +
+      ' keep=' + byCh[ch].keep + ' drop=' + byCh[ch].drop
+    );
+  });
+  Logger.log('keep-rows with bad Timestamp: ' + badTs);
+  filteredSamples.forEach(function (s, i) {
+    Logger.log('drop sample ' + (i + 1) + ': ' + JSON.stringify(s));
+  });
+
+  buildAlertsSheet();
+  const alerts = SheetService.readAsObjects(CONFIG.SHEETS.ALERTS, AL_HEADERS).rows;
+  Logger.log('alerts rows after rebuild: ' + alerts.length);
 }
 
 
